@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  AWAITING_MANUAL_PAYMENT
+  PAID
+  CONFIRMED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  STRIPE_CARD
+  INTERAC_E_TRANSFER
+  MANUAL_BANK_TRANSFER
+  OTHER_CA_GATEWAY
+}
+
+enum PaymentStatus {
+  PENDING_PAYMENT
+  REQUIRES_ACTION
+  PENDING_REVIEW
+  SUCCEEDED
+  PAID
+  FAILED
+}
+
+enum SalesItemStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UserRole {
+  ADMIN
+  PARTNER
+  USER
+}
+
+enum FulfillmentMethod {
+  PICKUP
+  DELIVERY
+}
+
+model User {
+  id                  String    @id @default(uuid())
+  name                String    @map("name")
+  title               String?   @map("title")
+  firstName           String?   @map("first_name")
+  lastName            String?   @map("last_name")
+  email               String    @unique @map("email")
+  role                UserRole  @default(USER) @map("role")
+  passwordHash        String?   @map("password_hash")
+  passwordResetTokenHash String?   @map("password_reset_token_hash")
+  passwordResetTokenExpiresAt DateTime? @map("password_reset_token_expires_at")
+  phone               String?   @map("phone")
+  address             String?   @map("address")
+  city                String?   @map("city")
+  province            String?   @map("province")
+  postalCode          String?   @map("postal_code")
+  isActive            Boolean   @default(true) @map("is_active")
+  invitedAt           DateTime? @map("invited_at")
+  invitedByUserId     String?   @map("invited_by_user_id")
+  inviteTokenHash     String?   @map("invite_token_hash")
+  inviteTokenExpiresAt DateTime? @map("invite_token_expires_at")
+  lastLoginAt         DateTime? @map("last_login_at")
+  orders              Order[]
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model GroupBuy {
+  id          String      @id @default(cuid())
+  title       String
+  description String?
+  currency    String      @default("CAD")
+  unitPrice   Int
+  active      Boolean     @default(true)
+  orderItems  OrderItem[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model SalesItem {
+  id                 String          @id @default(uuid())
+  name               String          @map("name")
+  description        String?
+  pickupInstructions String?         @map("pickup_instructions")
+  deliveryEnabled    Boolean         @default(false) @map("delivery_enabled")
+  deliveryBaseRangeMax Int           @default(10) @map("delivery_base_range_max")
+  deliveryBasePrice  Int             @default(0) @map("delivery_base_price")
+  deliveryAdditionalUnitPrice Int    @default(0) @map("delivery_additional_unit_price")
+  currency           String          @default("CAD")
+  pricePerUnit       Int             @map("price_per_unit")
+  status             SalesItemStatus
+  closingDate        DateTime        @map("closing_date")
+  orders             Order[]
+  createdAt          DateTime        @default(now()) @map("created_at")
+  updatedAt          DateTime        @updatedAt @map("updated_at")
+
+  @@map("sales_items")
+}
+
+model Order {
+  id             String        @id @default(uuid())
+  orderReference String        @unique @default(uuid()) @map("order_reference")
+  userId         String        @map("user_id")
+  user           User          @relation(fields: [userId], references: [id])
+  salesItemId    String        @map("sales_item_id")
+  salesItem      SalesItem     @relation(fields: [salesItemId], references: [id])
+  quantity       Int           @default(1)
+  totalAmount    Int           @map("total_amount")
+  status         OrderStatus   @default(PENDING_PAYMENT)
+  paymentStatus  PaymentStatus @default(REQUIRES_ACTION) @map("payment_status")
+  paidAt         DateTime?     @map("paid_at")
+  paymentMethod  PaymentMethod
+  fulfillmentMethod FulfillmentMethod @default(PICKUP) @map("fulfillment_method")
+  unitPrice      Int           @default(0) @map("unit_price")
+  currency       String        @default("CAD")
+  subtotal       Int
+  serviceFee     Int           @default(0) @map("service_fee")
+  notes          String?
+  payment        Payment?
+  items          OrderItem[]
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  groupBuyId  String
+  groupBuy    GroupBuy  @relation(fields: [groupBuyId], references: [id])
+  quantity    Int
+  unitPrice   Int
+  lineTotal   Int
+}
+
+model Payment {
+  id                  String        @id @default(cuid())
+  orderId             String        @unique
+  order               Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  method              PaymentMethod
+  status              PaymentStatus @default(REQUIRES_ACTION)
+  providerReference   String?
+  providerPayloadJson Json?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+}
