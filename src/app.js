@@ -10,7 +10,7 @@ import { stripeWebhookHandler } from './controllers/webhookController.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { stripeWebhookGuard } from './middleware/webhookGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
-import { env } from './config/env.js';
+import { allowedFrontendOrigins, env } from './config/env.js';
 
 export const app = express();
 const webhookRateLimiter = createRateLimiter({
@@ -19,9 +19,23 @@ const webhookRateLimiter = createRateLimiter({
   keyPrefix: 'stripe-webhook',
 });
 
+const corsOriginHandler = (origin, callback) => {
+  if (!origin) {
+    callback(null, true);
+    return;
+  }
+
+  if (allowedFrontendOrigins.includes(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  callback(new Error(`Origin ${origin} is not allowed by CORS.`));
+};
+
 app.use(
   cors({
-    origin: env.frontendUrl,
+    origin: corsOriginHandler,
     credentials: true,
   })
 );

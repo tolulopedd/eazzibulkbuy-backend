@@ -2,10 +2,33 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+function normalizeEnvValue(value) {
+  if (!value) {
+    return '';
+  }
+
+  const trimmed = value.trim();
+  const equalsIndex = trimmed.indexOf('=');
+
+  if (equalsIndex === -1) {
+    return trimmed;
+  }
+
+  const prefix = trimmed.slice(0, equalsIndex);
+  const remainder = trimmed.slice(equalsIndex + 1).trim();
+
+  if (/^[A-Z0-9_]+$/i.test(prefix) && /^https?:\/\//i.test(remainder)) {
+    return remainder;
+  }
+
+  return trimmed;
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT || 4000),
-  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  frontendUrl: normalizeEnvValue(process.env.FRONTEND_URL) || 'http://localhost:5173',
+  frontendUrls: process.env.FRONTEND_URLS || '',
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
   resendApiKey: process.env.RESEND_API_KEY || '',
@@ -33,6 +56,14 @@ export const env = {
   legacyAdminPassword: process.env.ADMIN_PASSWORD || '',
   adminSessionSecret: process.env.ADMIN_SESSION_SECRET || 'dev-admin-session-secret',
 };
+
+export const allowedFrontendOrigins = [
+  env.frontendUrl,
+  ...env.frontendUrls
+    .split(',')
+    .map((value) => normalizeEnvValue(value))
+    .filter(Boolean),
+];
 
 export const isStripeConfigured = Boolean(env.stripeSecretKey);
 export const isResendConfigured = Boolean(env.resendApiKey);

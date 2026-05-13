@@ -1,10 +1,12 @@
 import { env } from '../config/env.js';
 
 export function getSecureCookieOptions(maxAgeMs) {
+  const isProduction = env.nodeEnv !== 'development';
+
   return {
     httpOnly: true,
-    secure: env.nodeEnv !== 'development',
-    sameSite: 'strict',
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
     maxAge: maxAgeMs,
     path: '/',
   };

@@ -69,13 +69,14 @@ export async function createTransferProofUploadTarget({
     contentType,
   });
 
+  const contentDisposition = `inline; filename="${sanitizeFileName(fileName)}"`;
   const uploadUrl = await getSignedUrl(
     s3Client,
     new PutObjectCommand({
       Bucket: env.s3BucketName,
       Key: objectKey,
       ContentType: contentType,
-      ContentDisposition: `inline; filename="${sanitizeFileName(fileName)}"`,
+      ContentDisposition: contentDisposition,
     }),
     { expiresIn: DEFAULT_PRESIGNED_EXPIRY_SECONDS },
   );
@@ -84,6 +85,7 @@ export async function createTransferProofUploadTarget({
     storage: 'S3',
     objectKey,
     uploadUrl,
+    contentDisposition,
     expiresInSeconds: DEFAULT_PRESIGNED_EXPIRY_SECONDS,
   };
 }
