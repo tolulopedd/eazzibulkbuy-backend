@@ -4,7 +4,7 @@ import { isS3Configured, isStripeConfigured } from '../config/env.js';
 import { createStripePaymentIntent } from './paymentService.js';
 import { getManualPaymentInstructions } from './paymentService.js';
 import { retrieveStripePaymentIntent } from './paymentService.js';
-import { sendManualTransferSubmittedEmail, sendOrderPaidEmail, sendOrderPlacedEmail } from './emailService.js';
+import { sendOrderPaidEmail } from './emailService.js';
 import {
   buildStoredTransferProof,
   createTransferProofUploadTarget,
@@ -74,6 +74,10 @@ function getSalesItemSummaryFromOrder(order) {
   return cartSnapshot?.items?.length
     ? cartSnapshot.items.map((item) => `${item.name} x${item.quantity}`).join(', ')
     : order.salesItem?.name || 'Order items';
+}
+
+function getInitialFulfillmentStatus(fulfillmentMethod) {
+  return fulfillmentMethod === 'DELIVERY' ? 'PENDING_DELIVERY' : 'PENDING_PICKUP';
 }
 
 export async function createPendingOrder(payload) {
@@ -186,6 +190,7 @@ export async function createPendingOrder(payload) {
         salesItemId: primaryLine.salesItem.id,
         quantity: totalQuantity,
         fulfillmentMethod: orderLines.some((line) => line.fulfillmentMethod === 'DELIVERY') ? 'DELIVERY' : 'PICKUP',
+        fulfillmentStatus: getInitialFulfillmentStatus(orderLines.some((line) => line.fulfillmentMethod === 'DELIVERY') ? 'DELIVERY' : 'PICKUP'),
         unitPrice: primaryLine.salesItem.pricePerUnit,
         paymentMethod: storedPaymentMethod,
         currency: primaryLine.salesItem.currency,
@@ -209,26 +214,6 @@ export async function createPendingOrder(payload) {
     ? getManualPaymentInstructions(paymentMethod, { orderReference: order.orderReference })
     : null;
 
-  let orderCreatedEmailSent = false;
-  try {
-    await sendOrderPlacedEmail({
-      email,
-      buyerName: name,
-      salesItemName: salesItemSummary,
-      quantity: totalQuantity,
-      orderReference: order.orderReference,
-      paymentMethod: paymentMethod || undefined,
-      totalAmountCad: order.totalAmount,
-      instructions: resolvedManualInstructions || undefined,
-    });
-    orderCreatedEmailSent = true;
-  } catch (error) {
-    console.error('Failed to send order-placed email', {
-      orderReference: order.orderReference,
-      error: error?.message,
-    });
-  }
-
   return {
     orderId: order.id,
     orderReference: order.orderReference,
@@ -248,7 +233,7 @@ export async function createPendingOrder(payload) {
         }
       : null,
     manualConfirmationEtaHours: isManualFlow ? 12 : null,
-    orderCreatedEmailSent,
+    orderCreatedEmailSent: false,
   };
 }
 
@@ -278,6 +263,7 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
       paymentMethod,
       status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
       paymentStatus: 'PENDING_PAYMENT',
+      fulfillmentStatus: getInitialFulfillmentStatus(order.fulfillmentMethod),
       payment: {
         update: {
           method: paymentMethod,
@@ -459,34 +445,12 @@ export async function confirmManualTransferByReference({ orderReference, transfe
     },
   });
 
-  let emailSent = false;
-  try {
-    const cartSnapshot = parseCartNotes(order.notes);
-    const salesItemSummary = cartSnapshot?.items?.length
-      ? cartSnapshot.items.map((item) => `${item.name} x${item.quantity}`).join(', ')
-      : order.salesItem.name;
-    await sendManualTransferSubmittedEmail({
-      email: order.user.email,
-      buyerName: order.user.name,
-      salesItemName: salesItemSummary,
-      quantity: order.quantity,
-      totalAmountCad: order.totalAmount,
-      orderReference: order.orderReference,
-    });
-    emailSent = true;
-  } catch (error) {
-    console.error('Failed to send manual transfer submission email', {
-      orderReference: order.orderReference,
-      error: error?.message,
-    });
-  }
-
   return {
     ok: true,
     message: 'Transfer submitted successfully. We will confirm your transfer within 12 hours.',
     orderReference: order.orderReference,
     createdAt: order.createdAt,
-    emailSent,
+    emailSent: false,
   };
 }
 
@@ -628,12 +592,11 @@ export async function markOrderPaidByReference({ orderReference, providerReferen
     try {
       await sendOrderPaidEmail({
         email: outcome.order.user.email,
-        buyerName: outcome.order.user.name,
+        firstName: outcome.order.user.firstName || outcome.order.user.name?.split(' ').filter(Boolean)[0] || 'Customer',
         salesItemName: salesItemSummary,
         quantity: outcome.order.quantity,
         totalPaidCad: outcome.order.totalAmount,
         orderReference: outcome.order.orderReference,
-        pickupInstructions: outcome.order.salesItem.pickupInstructions || undefined,
       });
       paymentConfirmationEmailSent = true;
     } catch (error) {
@@ -667,12 +630,11 @@ export async function resendOrderPaymentConfirmationByReference({ orderReference
 
   await sendOrderPaidEmail({
     email: order.user.email,
-    buyerName: order.user.name,
+    firstName: order.user.firstName || order.user.name?.split(' ').filter(Boolean)[0] || 'Customer',
     salesItemName: getSalesItemSummaryFromOrder(order),
     quantity: order.quantity,
     totalPaidCad: order.totalAmount,
     orderReference: order.orderReference,
-    pickupInstructions: order.salesItem?.pickupInstructions || undefined,
   });
 
   return {

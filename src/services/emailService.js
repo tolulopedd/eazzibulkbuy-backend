@@ -80,106 +80,33 @@ export async function sendMail({ to, subject, text }) {
   console.log('[email:dry-run]', { provider: 'dry-run', to, subject, text });
 }
 
-function formatPaymentMethod(paymentMethod) {
-  if (!paymentMethod) {
-    return 'Unknown';
-  }
-
-  return paymentMethod
-    .toLowerCase()
-    .split('_')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-}
-
-export async function sendOrderPlacedEmail({
-  email,
-  buyerName,
-  salesItemName,
-  quantity,
-  orderReference,
-  paymentMethod,
-  totalAmountCad,
-  instructions,
-}) {
-  await sendMail({
-    to: email,
-    subject: `Order Received – ${salesItemName}`,
-    text: [
-      `Hello ${buyerName},`,
-      '',
-      'Your order has been created successfully.',
-      `Order reference: ${orderReference}`,
-      `Items: ${salesItemName}`,
-      `Quantity: ${quantity}`,
-      `Total amount: ${formatMoney(totalAmountCad)}`,
-      `Payment method: ${formatPaymentMethod(paymentMethod)}`,
-      instructions ? `Payment instructions: ${instructions}` : '',
-      '',
-      'Thank you for ordering with EazziBulkBuy.',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  });
-}
-
 export async function sendOrderPaidEmail({
   email,
-  buyerName,
+  firstName,
   salesItemName,
   quantity,
   totalPaidCad,
   orderReference,
-  pickupInstructions,
 }) {
-  const pickupLine = pickupInstructions
-    ? `Pickup instructions: ${pickupInstructions}`
-    : 'Pickup instructions: Not available yet. Our team will follow up.';
-
   await sendMail({
     to: email,
-    subject: `Order Confirmed – ${salesItemName}`,
+    subject: 'Order Confirmation',
     text: [
-      `Hello ${buyerName},`,
+      `Hello ${firstName},`,
       '',
-      'Your payment has been confirmed and your order is now approved.',
+      'Your payment has been confirmed and order submitted successfully with below details:',
       '',
       `Order reference: ${orderReference}`,
       `Items: ${salesItemName}`,
       `Quantity: ${quantity}`,
       `Total paid: ${formatMoney(totalPaidCad)}`,
-      pickupLine,
       '',
-      'Thank you for ordering with EazziBulkBuy.',
-    ].join('\n'),
-  });
-}
-
-export async function sendManualTransferSubmittedEmail({
-  email,
-  buyerName,
-  salesItemName,
-  quantity,
-  totalAmountCad,
-  orderReference,
-}) {
-  await sendMail({
-    to: email,
-    subject: `Order Submitted – ${salesItemName}`,
-    text: [
-      `Hello ${buyerName},`,
+      'We would provide further details once your order is ready for pick-up/delivery.',
       '',
-      'Order submitted successfully.',
-      'Your Interac transfer proof has been received and your order is now awaiting payment review.',
+      'Thank you for your patronage.',
       '',
-      `Order reference: ${orderReference}`,
-      `Items: ${salesItemName}`,
-      `Quantity: ${quantity}`,
-      `Total paid: ${formatMoney(totalAmountCad)}`,
-      '',
-      'Our team will review the transfer and update the order once payment is confirmed.',
-      '',
-      'Thank you for ordering with EazziBulkBuy.',
+      'Regards,',
+      'EazziBulkBuy.',
     ].join('\n'),
   });
 }

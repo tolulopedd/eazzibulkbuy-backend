@@ -47,6 +47,13 @@ enum FulfillmentMethod {
   DELIVERY
 }
 
+enum FulfillmentStatus {
+  PENDING_PICKUP
+  PICKED_UP
+  PENDING_DELIVERY
+  DELIVERED
+}
+
 model User {
   id                  String    @id @default(uuid())
   name                String    @map("name")
@@ -91,6 +98,7 @@ model GroupBuy {
 model SalesItem {
   id                 String          @id @default(uuid())
   name               String          @map("name")
+  batchNumber        String          @map("batch_number")
   description        String?
   pickupInstructions String?         @map("pickup_instructions")
   deliveryEnabled    Boolean         @default(false) @map("delivery_enabled")
@@ -122,6 +130,7 @@ model Order {
   paidAt         DateTime?     @map("paid_at")
   paymentMethod  PaymentMethod
   fulfillmentMethod FulfillmentMethod @default(PICKUP) @map("fulfillment_method")
+  fulfillmentStatus FulfillmentStatus @default(PENDING_PICKUP) @map("fulfillment_status")
   unitPrice      Int           @default(0) @map("unit_price")
   currency       String        @default("CAD")
   subtotal       Int

@@ -8,6 +8,8 @@ import {
   deleteSalesItemHandler,
   listCustomersHandler,
   listOrdersHandler,
+  exportOrdersHandler,
+  updateFulfillmentStatusHandler,
   confirmInteracPaymentHandler,
   paymentProofViewUrlHandler,
   resendPaymentConfirmationHandler,
@@ -27,6 +29,8 @@ router.delete('/sales-items/:salesItemId', requireAdminRoles('ADMIN', 'SUPERADMI
 router.get('/reports', requireAdminRoles('ADMIN', 'SUPERADMIN'), adminReportsHandler);
 router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomersHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
+router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
+router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
 router.post('/payments/:orderReference/confirm-interac', requireAdminRoles('ADMIN', 'SUPERADMIN'), confirmInteracPaymentHandler);
 router.post('/payments/:orderReference/resend-confirmation', requireAdminRoles('ADMIN', 'SUPERADMIN'), resendPaymentConfirmationHandler);
