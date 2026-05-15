@@ -80,6 +80,30 @@ function getInitialFulfillmentStatus(fulfillmentMethod) {
   return fulfillmentMethod === 'DELIVERY' ? 'PENDING_DELIVERY' : 'PENDING_PICKUP';
 }
 
+function getBaseOrderAmount({ subtotal, deliveryFee }) {
+  return subtotal + deliveryFee;
+}
+
+function calculateStripeProcessingFee(baseAmountCents) {
+  if (!baseAmountCents || baseAmountCents <= 0) {
+    return 0;
+  }
+
+  const grossTotal = Math.round((baseAmountCents + 30) / (1 - 0.029));
+  return Math.max(0, grossTotal - baseAmountCents);
+}
+
+function calculateOrderTotalAmount({ subtotal, deliveryFee, paymentMethod }) {
+  const baseAmount = getBaseOrderAmount({ subtotal, deliveryFee });
+  const stripeProcessingFee = paymentMethod === 'STRIPE_CARD' ? calculateStripeProcessingFee(baseAmount) : 0;
+
+  return {
+    baseAmount,
+    stripeProcessingFee,
+    totalAmount: baseAmount + stripeProcessingFee,
+  };
+}
+
 export async function createPendingOrder(payload) {
   const { title, firstName, lastName, email, phone, address, city, province, postalCode, items, paymentMethod } = payload;
   const name = buildBuyerName({ title, firstName, lastName });
@@ -124,11 +148,15 @@ export async function createPendingOrder(payload) {
   const subtotal = orderLines.reduce((sum, line) => sum + line.lineTotal, 0);
   const totalQuantity = orderLines.reduce((sum, line) => sum + line.quantity, 0);
   const deliveryFee = calculateGroupedDeliveryFee(orderLines);
-  const totalAmount = subtotal + deliveryFee;
   const storedPaymentMethod = paymentMethod || 'STRIPE_CARD';
   const hasExplicitPaymentMethod = Boolean(paymentMethod);
   const isManualFlow = hasExplicitPaymentMethod && paymentMethod !== 'STRIPE_CARD';
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
+  const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
+    subtotal,
+    deliveryFee,
+    paymentMethod: hasExplicitPaymentMethod ? storedPaymentMethod : null,
+  });
   const manualInstructions = null;
   const cartSnapshot = {
     items: orderLines.map((line) => ({
@@ -221,6 +249,7 @@ export async function createPendingOrder(payload) {
     totalAmount: order.totalAmount,
     subtotal: order.subtotal,
     deliveryFee: order.serviceFee,
+    stripeProcessingFee,
     fulfillmentMethod: order.fulfillmentMethod,
     cartItems: cartSnapshot.items,
     paymentMethod: hasExplicitPaymentMethod ? order.paymentMethod : null,
@@ -256,11 +285,17 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
   const manualInstructions = isManualFlow
     ? getManualPaymentInstructions(paymentMethod, { orderReference: order.orderReference })
     : null;
+  const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
+    subtotal: order.subtotal,
+    deliveryFee: order.serviceFee,
+    paymentMethod,
+  });
 
   const updated = await prisma.order.update({
     where: { orderReference },
     data: {
       paymentMethod,
+      totalAmount,
       status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
       paymentStatus: 'PENDING_PAYMENT',
       fulfillmentStatus: getInitialFulfillmentStatus(order.fulfillmentMethod),
@@ -280,6 +315,7 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
     totalAmount: updated.totalAmount,
     subtotal: updated.subtotal,
     deliveryFee: updated.serviceFee,
+    stripeProcessingFee,
     fulfillmentMethod: updated.fulfillmentMethod,
     cartItems: parseCartNotes(updated.notes)?.items || [],
     paymentMethod: updated.paymentMethod,
