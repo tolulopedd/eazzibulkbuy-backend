@@ -29,7 +29,7 @@ export function getManualPaymentInstructions(paymentMethod, options = {}) {
   const orderReference = options.orderReference || '{Include Order ID}';
 
   if (paymentMethod === 'INTERAC_E_TRANSFER') {
-    return `Send Interac e-Transfer to: ${env.interacBusinessEmail} and receive confirmation within 12 hours. Use your Order ID ${orderReference} for this transfer as narration.`;
+    return `Send Interac e-Transfer to: ${env.interacBusinessEmail} and receive confirmation within 6 hours. Use your Order ID ${orderReference} for this transfer as narration.`;
   }
 
   if (paymentMethod === 'MANUAL_BANK_TRANSFER') {

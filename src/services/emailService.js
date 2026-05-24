@@ -86,7 +86,7 @@ export async function sendOrderPaidEmail({
   salesItemName,
   quantity,
   totalPaidCad,
-  orderReference,
+  displayOrderReference,
 }) {
   await sendMail({
     to: email,
@@ -96,7 +96,7 @@ export async function sendOrderPaidEmail({
       '',
       'Your payment has been confirmed and order submitted successfully with below details:',
       '',
-      `Order reference: ${orderReference}`,
+      `Order reference: ${displayOrderReference}`,
       `Items: ${salesItemName}`,
       `Quantity: ${quantity}`,
       `Total paid: ${formatMoney(totalPaidCad)}`,

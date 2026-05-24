@@ -21,12 +21,29 @@ export async function ensureDatabaseCompatibility() {
   await prisma.$executeRawUnsafe(`
     DO $$
     BEGIN
+      CREATE TYPE "SalesItemType" AS ENUM ('NORMAL_SALE', 'BUNDLE_DISCOUNTED_SALE');
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
       IF to_regclass('public.sales_items') IS NOT NULL THEN
+        ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "sale_type" "SalesItemType";
         ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "batch_number" TEXT;
+        ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "bundle_items_json" JSONB;
         ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "delivery_enabled" BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "delivery_base_range_max" INTEGER NOT NULL DEFAULT 10;
         ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "delivery_base_price" INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE "sales_items" ADD COLUMN IF NOT EXISTS "delivery_additional_unit_price" INTEGER NOT NULL DEFAULT 0;
+        UPDATE "sales_items"
+        SET "sale_type" = 'NORMAL_SALE'::"SalesItemType"
+        WHERE "sale_type" IS NULL;
+        ALTER TABLE "sales_items" ALTER COLUMN "sale_type" SET DEFAULT 'NORMAL_SALE';
+        ALTER TABLE "sales_items" ALTER COLUMN "sale_type" SET NOT NULL;
         UPDATE "sales_items"
         SET "batch_number" = 'LEGACY-' || UPPER(SUBSTRING(REPLACE("id"::text, '-', '') FROM 1 FOR 8))
         WHERE "batch_number" IS NULL OR BTRIM("batch_number") = '';
@@ -60,10 +77,27 @@ export async function ensureDatabaseCompatibility() {
     DO $$
     BEGIN
       IF to_regclass('public.orders') IS NOT NULL THEN
+        ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "order_sequence" INTEGER;
         ALTER TABLE "orders"
         ADD COLUMN IF NOT EXISTS "fulfillment_method" "FulfillmentMethod" NOT NULL DEFAULT 'PICKUP';
         ALTER TABLE "orders"
         ADD COLUMN IF NOT EXISTS "fulfillment_status" "FulfillmentStatus";
+        WITH ranked_orders AS (
+          SELECT "id", ROW_NUMBER() OVER (PARTITION BY "sales_item_id" ORDER BY "created_at", "id") AS next_sequence
+          FROM "orders"
+        )
+        UPDATE "orders" AS o
+        SET "order_sequence" = ranked_orders.next_sequence
+        FROM ranked_orders
+        WHERE o."id" = ranked_orders."id"
+          AND (o."order_sequence" IS NULL OR o."order_sequence" <> ranked_orders.next_sequence);
+        UPDATE "orders"
+        SET "order_sequence" = 1
+        WHERE "order_sequence" IS NULL;
+        ALTER TABLE "orders"
+        ALTER COLUMN "order_sequence" SET DEFAULT 1;
+        ALTER TABLE "orders"
+        ALTER COLUMN "order_sequence" SET NOT NULL;
         UPDATE "orders"
         SET "fulfillment_status" = CASE
           WHEN "fulfillment_method" = 'DELIVERY' THEN 'PENDING_DELIVERY'::"FulfillmentStatus"
@@ -74,6 +108,8 @@ export async function ensureDatabaseCompatibility() {
         ALTER COLUMN "fulfillment_status" SET DEFAULT 'PENDING_PICKUP';
         ALTER TABLE "orders"
         ALTER COLUMN "fulfillment_status" SET NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS "orders_sales_item_id_order_sequence_key"
+          ON "orders"("sales_item_id", "order_sequence");
       END IF;
     END
     $$;

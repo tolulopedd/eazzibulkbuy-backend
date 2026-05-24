@@ -36,6 +36,11 @@ enum SalesItemStatus {
   INACTIVE
 }
 
+enum SalesItemType {
+  NORMAL_SALE
+  BUNDLE_DISCOUNTED_SALE
+}
+
 enum UserRole {
   ADMIN
   PARTNER
@@ -98,7 +103,9 @@ model GroupBuy {
 model SalesItem {
   id                 String          @id @default(uuid())
   name               String          @map("name")
+  saleType           SalesItemType   @default(NORMAL_SALE) @map("sale_type")
   batchNumber        String          @map("batch_number")
+  bundleItemsJson    Json?           @map("bundle_items_json")
   description        String?
   pickupInstructions String?         @map("pickup_instructions")
   deliveryEnabled    Boolean         @default(false) @map("delivery_enabled")
@@ -119,6 +126,7 @@ model SalesItem {
 model Order {
   id             String        @id @default(uuid())
   orderReference String        @unique @default(uuid()) @map("order_reference")
+  orderSequence  Int           @default(1) @map("order_sequence")
   userId         String        @map("user_id")
   user           User          @relation(fields: [userId], references: [id])
   salesItemId    String        @map("sales_item_id")
@@ -142,6 +150,7 @@ model Order {
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
   @@map("orders")
+  @@unique([salesItemId, orderSequence])
 }
 
 model OrderItem {

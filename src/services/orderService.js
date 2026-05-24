@@ -5,6 +5,7 @@ import { createStripePaymentIntent } from './paymentService.js';
 import { getManualPaymentInstructions } from './paymentService.js';
 import { retrieveStripePaymentIntent } from './paymentService.js';
 import { sendOrderPaidEmail } from './emailService.js';
+import { formatDisplayOrderReference } from '../utils/orderReference.js';
 import {
   buildStoredTransferProof,
   createTransferProofUploadTarget,
@@ -24,6 +25,16 @@ function getDeliveryGroupKey(salesItem) {
   ].join(':');
 }
 
+function getEffectiveDeliveryUnits(line) {
+  if (line.salesItem?.saleType !== 'BUNDLE_DISCOUNTED_SALE') {
+    return line.quantity;
+  }
+
+  const bundleItems = Array.isArray(line.salesItem.bundleItemsJson) ? line.salesItem.bundleItemsJson : [];
+  const unitsPerBundle = bundleItems.reduce((sum, item) => sum + Math.max(0, Number(item?.quantity) || 0), 0);
+  return line.quantity * Math.max(1, unitsPerBundle);
+}
+
 function calculateGroupedDeliveryFee(lines) {
   const groupedQuantities = new Map();
 
@@ -39,7 +50,7 @@ function calculateGroupedDeliveryFee(lines) {
     const key = getDeliveryGroupKey(line.salesItem);
     const current = groupedQuantities.get(key) || { quantity: 0, salesItem: line.salesItem };
     groupedQuantities.set(key, {
-      quantity: current.quantity + line.quantity,
+      quantity: current.quantity + getEffectiveDeliveryUnits(line),
       salesItem: line.salesItem,
     });
   }
@@ -104,6 +115,12 @@ function calculateOrderTotalAmount({ subtotal, deliveryFee, paymentMethod }) {
   };
 }
 
+async function reserveNextOrderSequence(tx, salesItemId) {
+  await tx.$queryRaw`SELECT "id" FROM "sales_items" WHERE "id" = ${salesItemId} FOR UPDATE`;
+  const result = await tx.$queryRaw`SELECT COALESCE(MAX("order_sequence"), 0) AS "maxSequence" FROM "orders" WHERE "sales_item_id" = ${salesItemId}`;
+  return Number(result?.[0]?.maxSequence || 0) + 1;
+}
+
 export async function createPendingOrder(payload) {
   const { title, firstName, lastName, email, phone, address, city, province, postalCode, items, paymentMethod } = payload;
   const name = buildBuyerName({ title, firstName, lastName });
@@ -162,11 +179,24 @@ export async function createPendingOrder(payload) {
     items: orderLines.map((line) => ({
       salesItemId: line.salesItemId,
       name: line.salesItem.name,
+      saleType: line.salesItem.saleType,
       description: line.salesItem.description,
+      bundleItems: Array.isArray(line.salesItem.bundleItemsJson) ? line.salesItem.bundleItemsJson : [],
       quantity: line.quantity,
       unitPrice: line.unitPrice,
       lineTotal: line.lineTotal,
       fulfillmentMethod: line.fulfillmentMethod,
+      fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+      fulfillmentChildren: line.salesItem.saleType === 'BUNDLE_DISCOUNTED_SALE'
+        ? (Array.isArray(line.salesItem.bundleItemsJson) ? line.salesItem.bundleItemsJson : []).map((bundleItem) => ({
+            name: bundleItem.name,
+            quantity: (Number(bundleItem.quantity) || 0) * line.quantity,
+            lineTotal: null,
+            fulfillmentMethod: line.fulfillmentMethod,
+            fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+            parentBundleName: line.salesItem.name,
+          }))
+        : [],
       location: line.salesItem.pickupInstructions,
       deliveryConfig: {
         enabled: line.salesItem.deliveryEnabled,
@@ -212,8 +242,11 @@ export async function createPendingOrder(payload) {
       },
     });
 
+    const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.id);
+
     return tx.order.create({
       data: {
+        orderSequence,
         userId: user.id,
         salesItemId: primaryLine.salesItem.id,
         quantity: totalQuantity,
@@ -238,13 +271,22 @@ export async function createPendingOrder(payload) {
     });
   });
 
+  const displayOrderReference = formatDisplayOrderReference({
+    createdAt: order.createdAt,
+    batchNumber: primaryLine.salesItem.batchNumber,
+    orderSequence: order.orderSequence,
+  });
+
   const resolvedManualInstructions = isManualFlow
-    ? getManualPaymentInstructions(paymentMethod, { orderReference: order.orderReference })
+    ? getManualPaymentInstructions(paymentMethod, { orderReference: displayOrderReference })
     : null;
 
   return {
     orderId: order.id,
     orderReference: order.orderReference,
+    displayOrderReference,
+    orderSequence: order.orderSequence,
+    batchNumber: primaryLine.salesItem.batchNumber,
     createdAt: order.createdAt,
     totalAmount: order.totalAmount,
     subtotal: order.subtotal,
@@ -258,10 +300,10 @@ export async function createPendingOrder(payload) {
       ? {
           transferEmail: isInteracFlow ? env.interacBusinessEmail : null,
           instructions: resolvedManualInstructions,
-          confirmationEtaHours: 12,
+          confirmationEtaHours: 6,
         }
       : null,
-    manualConfirmationEtaHours: isManualFlow ? 12 : null,
+    manualConfirmationEtaHours: isManualFlow ? 6 : null,
     orderCreatedEmailSent: false,
   };
 }
@@ -283,7 +325,13 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
   const isManualFlow = paymentMethod !== 'STRIPE_CARD';
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
   const manualInstructions = isManualFlow
-    ? getManualPaymentInstructions(paymentMethod, { orderReference: order.orderReference })
+    ? getManualPaymentInstructions(paymentMethod, {
+        orderReference: formatDisplayOrderReference({
+          createdAt: order.createdAt,
+          batchNumber: order.salesItem?.batchNumber,
+          orderSequence: order.orderSequence,
+        }),
+      })
     : null;
   const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
     subtotal: order.subtotal,
@@ -311,6 +359,13 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
   return {
     orderId: updated.id,
     orderReference: updated.orderReference,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: updated.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: updated.orderSequence,
+    }),
+    orderSequence: updated.orderSequence,
+    batchNumber: order.salesItem?.batchNumber || '',
     createdAt: updated.createdAt,
     totalAmount: updated.totalAmount,
     subtotal: updated.subtotal,
@@ -324,17 +379,17 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
       ? {
           transferEmail: isInteracFlow ? env.interacBusinessEmail : null,
           instructions: manualInstructions,
-          confirmationEtaHours: 12,
+          confirmationEtaHours: 6,
         }
       : null,
-    manualConfirmationEtaHours: isManualFlow ? 12 : null,
+    manualConfirmationEtaHours: isManualFlow ? 6 : null,
   };
 }
 
 export async function createOrderPaymentIntent(orderReference) {
   const order = await prisma.order.findUnique({
     where: { orderReference },
-    include: { user: true },
+    include: { user: true, salesItem: true },
   });
 
   if (!order) {
@@ -367,6 +422,11 @@ export async function createOrderPaymentIntent(orderReference) {
   return {
     orderId: order.id,
     orderReference: order.orderReference,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
     clientSecret: paymentIntent.client_secret,
   };
 }
@@ -437,6 +497,11 @@ export async function confirmManualTransferByReference({ orderReference, transfe
       alreadyConfirmed: true,
       message: 'Payment already confirmed.',
       orderReference: order.orderReference,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
     };
   }
 
@@ -444,8 +509,13 @@ export async function confirmManualTransferByReference({ orderReference, transfe
     return {
       ok: true,
       alreadyConfirmed: true,
-      message: 'Transfer already submitted for review. We will confirm within 12 hours.',
+      message: 'Transfer already submitted for review. We will confirm within 6 hours.',
       orderReference: order.orderReference,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
       emailSent: false,
     };
   }
@@ -483,8 +553,13 @@ export async function confirmManualTransferByReference({ orderReference, transfe
 
   return {
     ok: true,
-    message: 'Transfer submitted successfully. We will confirm your transfer within 12 hours.',
+    message: 'Transfer submitted successfully. We will confirm your transfer within 6 hours.',
     orderReference: order.orderReference,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
     createdAt: order.createdAt,
     emailSent: false,
   };
@@ -518,7 +593,7 @@ export async function getManualTransferProofViewUrlByReference({ orderReference 
 export async function confirmCardPaymentByReference({ orderReference, paymentIntentId }) {
   const order = await prisma.order.findUnique({
     where: { orderReference },
-    include: { payment: true },
+    include: { payment: true, salesItem: true },
   });
 
   if (!order) {
@@ -533,6 +608,11 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
     return {
       orderReference: order.orderReference,
       createdAt: order.createdAt,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
       alreadyConfirmed: true,
       emailSent: false,
     };
@@ -553,6 +633,11 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
     return {
       orderReference: confirmedOrder.orderReference,
       createdAt: confirmedOrder.createdAt,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: confirmedOrder.createdAt,
+        batchNumber: confirmedOrder.salesItem?.batchNumber,
+        orderSequence: confirmedOrder.orderSequence,
+      }),
       paidAt: confirmedOrder.paidAt,
       emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
     };
@@ -576,6 +661,11 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
   return {
     orderReference: confirmedOrder.orderReference,
     createdAt: confirmedOrder.createdAt,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: confirmedOrder.createdAt,
+      batchNumber: confirmedOrder.salesItem?.batchNumber,
+      orderSequence: confirmedOrder.orderSequence,
+    }),
     paidAt: confirmedOrder.paidAt,
     emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
   };
@@ -632,7 +722,11 @@ export async function markOrderPaidByReference({ orderReference, providerReferen
         salesItemName: salesItemSummary,
         quantity: outcome.order.quantity,
         totalPaidCad: outcome.order.totalAmount,
-        orderReference: outcome.order.orderReference,
+        displayOrderReference: formatDisplayOrderReference({
+          createdAt: outcome.order.createdAt,
+          batchNumber: outcome.order.salesItem?.batchNumber,
+          orderSequence: outcome.order.orderSequence,
+        }),
       });
       paymentConfirmationEmailSent = true;
     } catch (error) {
@@ -670,7 +764,11 @@ export async function resendOrderPaymentConfirmationByReference({ orderReference
     salesItemName: getSalesItemSummaryFromOrder(order),
     quantity: order.quantity,
     totalPaidCad: order.totalAmount,
-    orderReference: order.orderReference,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
   });
 
   return {

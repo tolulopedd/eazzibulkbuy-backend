@@ -3,6 +3,7 @@ import { requireAdminAuth, requireAdminRoles } from '../middleware/adminAuth.js'
 import {
   createSalesItemHandler,
   adminReportsHandler,
+  exportReportsHandler,
   listSalesItemsHandler,
   updateSalesItemHandler,
   deleteSalesItemHandler,
@@ -13,6 +14,8 @@ import {
   confirmInteracPaymentHandler,
   paymentProofViewUrlHandler,
   resendPaymentConfirmationHandler,
+  updateCustomerHandler,
+  exportCustomersHandler,
 } from '../controllers/adminController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
 
@@ -27,7 +30,10 @@ router.post('/sales-items', requireAdminRoles('ADMIN', 'SUPERADMIN'), createSale
 router.patch('/sales-items/:salesItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateSalesItemHandler);
 router.delete('/sales-items/:salesItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteSalesItemHandler);
 router.get('/reports', requireAdminRoles('ADMIN', 'SUPERADMIN'), adminReportsHandler);
+router.get('/reports/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportReportsHandler);
 router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomersHandler);
+router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportCustomersHandler);
+router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateCustomerHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
