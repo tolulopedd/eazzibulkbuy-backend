@@ -80,10 +80,27 @@ function parseCartNotes(notes) {
   }
 }
 
+function formatSnapshotItemSummary(item) {
+  const saleType = item?.saleType;
+  const quantity = Number(item?.quantity) || 0;
+  const bundleItems = Array.isArray(item?.bundleItems) ? item.bundleItems : [];
+
+  if (saleType === 'BUNDLE_DISCOUNTED_SALE' && bundleItems.length) {
+    return bundleItems
+      .map((bundleItem) => {
+        const bundleQuantity = (Number(bundleItem?.quantity) || 0) * Math.max(1, quantity);
+        return `${bundleItem?.name || 'Item'} x ${bundleQuantity}`;
+      })
+      .join(' + ');
+  }
+
+  return `${item?.name || 'Order items'} x ${Math.max(1, quantity)}`;
+}
+
 function getSalesItemSummaryFromOrder(order) {
   const cartSnapshot = parseCartNotes(order.notes);
   return cartSnapshot?.items?.length
-    ? cartSnapshot.items.map((item) => `${item.name} x${item.quantity}`).join(', ')
+    ? cartSnapshot.items.map((item) => formatSnapshotItemSummary(item)).join(' + ')
     : order.salesItem?.name || 'Order items';
 }
 
