@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAdminAuth, requireAdminRoles } from '../middleware/adminAuth.js';
+import { requireTrustedOrigin } from '../middleware/security.js';
 import {
   createSalesItemHandler,
   adminReportsHandler,
@@ -22,6 +23,13 @@ import { createUserHandler, inviteUserHandler, listUsersHandler } from '../contr
 const router = Router();
 
 router.use(requireAdminAuth);
+router.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return next();
+  }
+
+  return requireTrustedOrigin(req, res, next);
+});
 router.get('/users', requireAdminRoles('SUPERADMIN'), listUsersHandler);
 router.post('/users', requireAdminRoles('SUPERADMIN'), createUserHandler);
 router.post('/users/invite', requireAdminRoles('SUPERADMIN'), inviteUserHandler);

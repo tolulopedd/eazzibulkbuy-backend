@@ -195,6 +195,7 @@ export async function createPendingOrder(payload) {
   const cartSnapshot = {
     items: orderLines.map((line) => ({
       salesItemId: line.salesItemId,
+      batchNumber: line.salesItem.batchNumber,
       name: line.salesItem.name,
       saleType: line.salesItem.saleType,
       description: line.salesItem.description,

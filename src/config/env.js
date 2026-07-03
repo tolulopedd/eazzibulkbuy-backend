@@ -57,6 +57,25 @@ export const env = {
   adminSessionSecret: process.env.ADMIN_SESSION_SECRET || 'dev-admin-session-secret',
 };
 
+export function validateSecurityConfiguration() {
+  const issues = [];
+
+  if (env.nodeEnv === 'production') {
+    if (!process.env.ADMIN_SESSION_SECRET || env.adminSessionSecret === 'dev-admin-session-secret') {
+      issues.push('ADMIN_SESSION_SECRET must be set to a strong unique value in production.');
+    }
+
+    if (
+      (!process.env.SUPERADMIN_PASSWORD && !process.env.ADMIN_PASSWORD) ||
+      env.superAdminPassword === 'ChangeMe123!'
+    ) {
+      issues.push('SUPERADMIN_PASSWORD or ADMIN_PASSWORD must be set to a strong unique value in production.');
+    }
+  }
+
+  return issues;
+}
+
 export const allowedFrontendOrigins = [
   env.frontendUrl,
   ...env.frontendUrls

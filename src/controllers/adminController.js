@@ -57,6 +57,101 @@ function parseOrderNotes(notes) {
   }
 }
 
+function getOrderSnapshotItems(order) {
+  const snapshot = parseOrderNotes(order.notes);
+  return Array.isArray(snapshot?.items) ? snapshot.items : [];
+}
+
+function getOrderSalesItemIds(order) {
+  const snapshotItems = getOrderSnapshotItems(order);
+  const ids = snapshotItems
+    .map((item) => item?.salesItemId)
+    .filter(Boolean);
+
+  if (!ids.length && order.salesItemId) {
+    ids.push(order.salesItemId);
+  }
+
+  return [...new Set(ids)];
+}
+
+function getOrderBatchNumbers(order) {
+  const snapshotItems = getOrderSnapshotItems(order);
+  const batchNumbers = snapshotItems
+    .map((item) => item?.batchNumber)
+    .filter(Boolean);
+
+  if (!batchNumbers.length && order.salesItem?.batchNumber) {
+    batchNumbers.push(order.salesItem.batchNumber);
+  }
+
+  return [...new Set(batchNumbers)];
+}
+
+function includesInsensitive(value, query) {
+  return String(value || '').toLowerCase().includes(String(query || '').toLowerCase());
+}
+
+function orderMatchesBatchNumber(order, batchNumber) {
+  if (!batchNumber) {
+    return true;
+  }
+
+  return getOrderBatchNumbers(order).some((value) => includesInsensitive(value, batchNumber));
+}
+
+function orderMatchesSalesItemId(order, salesItemId) {
+  if (!salesItemId) {
+    return true;
+  }
+
+  return getOrderSalesItemIds(order).includes(salesItemId);
+}
+
+function orderMatchesTextQuery(order, query) {
+  if (!query) {
+    return true;
+  }
+
+  const fulfillmentItems = normalizeFulfillmentItems(order);
+  const haystack = [
+    order.orderReference,
+    formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
+    order.user?.name,
+    order.user?.email,
+    order.user?.phone,
+    order.salesItem?.name,
+    ...getOrderBatchNumbers(order),
+    ...fulfillmentItems.map((item) => item.name),
+    ...fulfillmentItems.map((item) => item.bundleName),
+  ];
+
+  return haystack.some((value) => includesInsensitive(value, query));
+}
+
+function orderMatchesFulfillmentFilters(order, { fulfillmentMethod, fulfillmentStatus }) {
+  if (!fulfillmentMethod && !fulfillmentStatus) {
+    return true;
+  }
+
+  const fulfillmentItems = normalizeFulfillmentItems(order);
+  return fulfillmentItems.some((item) => {
+    if (fulfillmentMethod && item.fulfillmentMethod !== fulfillmentMethod) {
+      return false;
+    }
+
+    if (fulfillmentStatus && item.fulfillmentStatus !== fulfillmentStatus) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 function getDefaultItemFulfillmentStatus(order, item = {}) {
   if (item.fulfillmentStatus) {
     return item.fulfillmentStatus;
@@ -388,7 +483,7 @@ export async function listSalesItemsHandler(req, res, next) {
     const skip = (query.page - 1) * query.limit;
     const take = query.limit;
 
-    const [items, total] = await Promise.all([
+    const [items, total, orders] = await Promise.all([
       prisma.salesItem.findMany({
         where,
         orderBy: { [query.sortBy]: query.sortOrder },
@@ -403,10 +498,35 @@ export async function listSalesItemsHandler(req, res, next) {
         take,
       }),
       prisma.salesItem.count({ where }),
+      prisma.order.findMany({
+        select: {
+          salesItemId: true,
+          notes: true,
+        },
+      }),
     ]);
 
+    const targetItemIds = new Set(items.map((item) => item.id));
+    const orderCountsBySalesItemId = new Map();
+
+    for (const order of orders) {
+      const relatedSalesItemIds = getOrderSalesItemIds(order).filter((salesItemId) => targetItemIds.has(salesItemId));
+
+      for (const salesItemId of relatedSalesItemIds) {
+        orderCountsBySalesItemId.set(salesItemId, (orderCountsBySalesItemId.get(salesItemId) || 0) + 1);
+      }
+    }
+
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      _count: {
+        ...item._count,
+        orders: orderCountsBySalesItemId.get(item.id) || 0,
+      },
+    }));
+
     res.json({
-      items,
+      items: normalizedItems,
       page: query.page,
       limit: query.limit,
       total,
@@ -524,10 +644,6 @@ export async function adminReportsHandler(req, res, next) {
 
 async function buildAdminReportsData(query) {
     const where = {
-      ...(query.salesItemId ? { salesItemId: query.salesItemId } : {}),
-      ...(query.batchNumber ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } } : {}),
-      ...(query.fulfillmentMethod ? { fulfillmentMethod: query.fulfillmentMethod } : {}),
-      ...(query.fulfillmentStatus ? { fulfillmentStatus: query.fulfillmentStatus } : {}),
       ...((query.startDate || query.endDate)
         ? {
             createdAt: {
@@ -709,7 +825,14 @@ async function buildAdminReportsData(query) {
         aggregateFulfillmentStatus,
         itemDetails,
       };
-    });
+    }).filter((order) =>
+      orderMatchesSalesItemId(order, query.salesItemId) &&
+      orderMatchesBatchNumber(order, query.batchNumber) &&
+      orderMatchesFulfillmentFilters(order, {
+        fulfillmentMethod: query.fulfillmentMethod,
+        fulfillmentStatus: query.fulfillmentStatus,
+      }),
+    );
 
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
 
@@ -1214,67 +1337,46 @@ export async function listOrdersHandler(req, res, next) {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
-      ...(query.fulfillmentMethod ? { fulfillmentMethod: query.fulfillmentMethod } : {}),
-      ...(query.fulfillmentStatus ? { fulfillmentStatus: query.fulfillmentStatus } : {}),
-      ...(query.batchNumber ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } } : {}),
       ...(query.paidOnly === true ? { paymentStatus: 'PAID' } : {}),
-      ...(query.q
-        ? {
-            OR: [
-              { orderReference: { contains: query.q, mode: 'insensitive' } },
-              { salesItem: { batchNumber: { contains: query.q, mode: 'insensitive' } } },
-              { user: { name: { contains: query.q, mode: 'insensitive' } } },
-              { user: { email: { contains: query.q, mode: 'insensitive' } } },
-              { user: { phone: { contains: query.q } } },
-              { salesItem: { name: { contains: query.q, mode: 'insensitive' } } },
-            ],
-          }
-        : {}),
     };
 
-    const skip = (query.page - 1) * query.limit;
-    const [orders, total] = await Promise.all([
-      prisma.order.findMany({
-        where,
-        orderBy: { [query.sortBy]: query.sortOrder },
-        skip,
-        take: query.limit,
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              title: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true,
-              address: true,
-              city: true,
-              province: true,
-              postalCode: true,
-            },
-          },
-          salesItem: {
-            select: {
-              id: true,
-              name: true,
-              batchNumber: true,
-              pickupInstructions: true,
-            },
-          },
-          payment: {
-            select: {
-              status: true,
-              providerPayloadJson: true,
-              providerReference: true,
-              updatedAt: true,
-            },
+    const orders = await prisma.order.findMany({
+      where,
+      orderBy: { [query.sortBy]: query.sortOrder },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
           },
         },
-      }),
-      prisma.order.count({ where }),
-    ]);
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            providerReference: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
 
     const reconciledOrders = await Promise.all(
       orders.map(async (order) => {
@@ -1338,10 +1440,21 @@ export async function listOrdersHandler(req, res, next) {
         }),
         fulfillmentItems,
       };
-    });
+    }).filter((order) =>
+      orderMatchesBatchNumber(order, query.batchNumber) &&
+      orderMatchesTextQuery(order, query.q) &&
+      orderMatchesFulfillmentFilters(order, {
+        fulfillmentMethod: query.fulfillmentMethod,
+        fulfillmentStatus: query.fulfillmentStatus,
+      }),
+    );
+
+    const total = normalizedOrders.length;
+    const skip = (query.page - 1) * query.limit;
+    const pagedOrders = normalizedOrders.slice(skip, skip + query.limit);
 
     return res.json({
-      items: normalizedOrders,
+      items: pagedOrders,
       page: query.page,
       limit: query.limit,
       total,
@@ -1364,22 +1477,7 @@ export async function exportOrdersHandler(req, res, next) {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
-      ...(query.fulfillmentMethod ? { fulfillmentMethod: query.fulfillmentMethod } : {}),
-      ...(query.fulfillmentStatus ? { fulfillmentStatus: query.fulfillmentStatus } : {}),
-      ...(query.batchNumber ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } } : {}),
       ...(query.paidOnly === true ? { paymentStatus: 'PAID' } : {}),
-      ...(query.q
-        ? {
-            OR: [
-              { orderReference: { contains: query.q, mode: 'insensitive' } },
-              { salesItem: { batchNumber: { contains: query.q, mode: 'insensitive' } } },
-              { user: { name: { contains: query.q, mode: 'insensitive' } } },
-              { user: { email: { contains: query.q, mode: 'insensitive' } } },
-              { user: { phone: { contains: query.q } } },
-              { salesItem: { name: { contains: query.q, mode: 'insensitive' } } },
-            ],
-          }
-        : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -1407,6 +1505,15 @@ export async function exportOrdersHandler(req, res, next) {
       },
     });
 
+    const filteredOrders = orders.filter((order) =>
+      orderMatchesBatchNumber(order, query.batchNumber) &&
+      orderMatchesTextQuery(order, query.q) &&
+      orderMatchesFulfillmentFilters(order, {
+        fulfillmentMethod: query.fulfillmentMethod,
+        fulfillmentStatus: query.fulfillmentStatus,
+      }),
+    );
+
     const rows = [
       [
         'Order Reference',
@@ -1430,7 +1537,7 @@ export async function exportOrdersHandler(req, res, next) {
         'Paid At',
         'Location of Sales',
       ].map(escapeCsv).join(','),
-      ...orders.map((order) => [
+      ...filteredOrders.map((order) => [
         formatDisplayOrderReference({
           createdAt: order.createdAt,
           batchNumber: order.salesItem?.batchNumber,
