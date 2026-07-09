@@ -274,6 +274,53 @@ function deriveAggregateFulfillmentStatus(order, fulfillmentItems) {
   return fulfillmentItems.every((item) => item.fulfillmentStatus === 'PICKED_UP') ? 'PICKED_UP' : 'PENDING_PICKUP';
 }
 
+function buildPaidBatchSalesComparison(paidOrders) {
+  const batchMap = new Map();
+
+  for (const order of paidOrders) {
+    const paidDate = order.paidAt || order.createdAt;
+
+    for (const item of order.itemDetails || []) {
+      const batchNumber = item.batchNumber || order.salesItem?.batchNumber || '';
+      if (!batchNumber) {
+        continue;
+      }
+
+      const saleType = item.saleType || order.salesItem?.saleType || 'NORMAL_SALE';
+      const quantity = Number(item.quantity) || 0;
+      const existing = batchMap.get(batchNumber) || {
+        batchNumber,
+        latestPaidAt: paidDate,
+        normalPaidItems: 0,
+        bundlePaidItems: 0,
+      };
+
+      if (!existing.latestPaidAt || (paidDate && paidDate > existing.latestPaidAt)) {
+        existing.latestPaidAt = paidDate;
+      }
+
+      if (saleType === 'BUNDLE_DISCOUNTED_SALE') {
+        existing.bundlePaidItems += quantity;
+      } else {
+        existing.normalPaidItems += quantity;
+      }
+
+      batchMap.set(batchNumber, existing);
+    }
+  }
+
+  return Array.from(batchMap.values())
+    .sort((a, b) => new Date(b.latestPaidAt).getTime() - new Date(a.latestPaidAt).getTime())
+    .slice(0, 5)
+    .sort((a, b) => new Date(a.latestPaidAt).getTime() - new Date(b.latestPaidAt).getTime())
+    .map((entry) => ({
+      batchNumber: entry.batchNumber,
+      normalPaidItems: entry.normalPaidItems,
+      bundlePaidItems: entry.bundlePaidItems,
+      latestPaidAt: entry.latestPaidAt,
+    }));
+}
+
 const batchNumberSchema = z
   .string()
   .trim()
@@ -835,6 +882,7 @@ async function buildAdminReportsData(query) {
     );
 
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
+    const paidBatchSalesComparison = buildPaidBatchSalesComparison(paidOrders);
 
     const orderReadyRows = paidOrders.map((order) => ({
       id: order.id,
@@ -970,6 +1018,7 @@ async function buildAdminReportsData(query) {
           activeBundleSales,
           salesEventsYtd,
           salesEventsMtd,
+          paidBatchSalesComparison,
           nextLiveEvent: nextLiveEvent
             ? {
                 name: nextLiveEvent.name,
