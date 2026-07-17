@@ -50,6 +50,7 @@ export async function adminLoginHandler(req, res, next) {
         email: payload.email,
         role: 'SUPERADMIN',
         isSuperAdmin: true,
+        sessionToken: token,
       });
     }
 
@@ -87,6 +88,7 @@ export async function adminLoginHandler(req, res, next) {
       email: payload.email,
       role: account.role,
       isSuperAdmin: false,
+      sessionToken: token,
     });
   } catch (error) {
     next(error);

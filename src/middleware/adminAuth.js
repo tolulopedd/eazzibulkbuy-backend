@@ -2,9 +2,23 @@ import { readCookie } from '../utils/cookies.js';
 import { verifyAdminSessionToken } from '../utils/adminSession.js';
 import { prisma } from '../config/prisma.js';
 
+function readBearerToken(req) {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (!authHeader || typeof authHeader !== 'string') {
+    return null;
+  }
+
+  const [scheme, token] = authHeader.split(' ');
+  if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) {
+    return null;
+  }
+
+  return token.trim();
+}
+
 export async function requireAdminAuth(req, res, next) {
   try {
-    const token = readCookie(req, 'admin_session');
+    const token = readBearerToken(req) || readCookie(req, 'admin_session');
     const session = verifyAdminSessionToken(token);
 
     if (!session) {
