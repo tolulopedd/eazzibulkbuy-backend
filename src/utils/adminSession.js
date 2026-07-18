@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { env } from '../config/env.js';
 
-const SESSION_TTL_SECONDS = 60 * 60 * 12;
+const SESSION_TTL_SECONDS = env.adminSessionTtlMinutes * 60;
 
 function base64Url(input) {
   return Buffer.from(input).toString('base64url');

@@ -56,3 +56,16 @@ export const confirmCardPaymentSchema = z.object({
   orderReference: z.string().uuid(),
   paymentIntentId: z.preprocess((v) => sanitizeText(v), z.string().min(5).max(200)),
 });
+
+export const createHelcimCheckoutSchema = z.object({
+  orderReference: z.string().uuid(),
+});
+
+export const confirmHelcimPaymentSchema = z.object({
+  orderReference: z.string().uuid(),
+  checkoutToken: z.preprocess((v) => sanitizeText(v), z.string().min(5).max(200)),
+  transactionResponse: z.object({
+    data: z.record(z.any()),
+    hash: z.preprocess((v) => sanitizeText(v), z.string().min(8).max(200)),
+  }),
+});

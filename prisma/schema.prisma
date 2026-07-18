@@ -17,6 +17,7 @@ enum OrderStatus {
 
 enum PaymentMethod {
   STRIPE_CARD
+  HELCIM_CARD
   INTERAC_E_TRANSFER
   MANUAL_BANK_TRANSFER
   OTHER_CA_GATEWAY

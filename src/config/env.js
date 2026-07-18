@@ -27,10 +27,13 @@ function normalizeEnvValue(value) {
 export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT || 4000),
+  adminSessionTtlMinutes: Math.max(30, Number(process.env.ADMIN_SESSION_TTL_MINUTES || 480)),
   frontendUrl: normalizeEnvValue(process.env.FRONTEND_URL) || 'http://localhost:5173',
   frontendUrls: process.env.FRONTEND_URLS || '',
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
+  helcimApiToken: process.env.HELCIM_API_TOKEN || '',
+  helcimApiBaseUrl: process.env.HELCIM_API_BASE_URL || 'https://api.helcim.com',
   resendApiKey: process.env.RESEND_API_KEY || '',
   resendFrom: process.env.RESEND_FROM || 'EazziBulkBuy <no-reply@eazzibulkbuy.com>',
   s3Region: process.env.AWS_S3_REGION || '',
@@ -85,6 +88,7 @@ export const allowedFrontendOrigins = [
 ];
 
 export const isStripeConfigured = Boolean(env.stripeSecretKey);
+export const isHelcimConfigured = Boolean(env.helcimApiToken);
 export const isResendConfigured = Boolean(env.resendApiKey);
 export const isSmtpConfigured = Boolean(env.smtpHost && env.smtpUser && env.smtpPass);
 export const isS3Configured = Boolean(

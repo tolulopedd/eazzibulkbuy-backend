@@ -1,7 +1,18 @@
+import crypto from 'crypto';
 import Stripe from 'stripe';
-import { env, isStripeConfigured } from '../config/env.js';
+import { env, isHelcimConfigured, isStripeConfigured } from '../config/env.js';
 
 export const stripe = isStripeConfigured ? new Stripe(env.stripeSecretKey) : null;
+
+function escapeUnicodeForHelcim(value) {
+  return value.replace(/[\u007f-\uffff]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
+function normalizeHelcimHashPayload(transactionData) {
+  return escapeUnicodeForHelcim(JSON.stringify(transactionData));
+}
 
 export async function createStripePaymentIntent({ amount, currency, orderReference, customerEmail }) {
   if (!stripe) {
@@ -23,6 +34,51 @@ export async function retrieveStripePaymentIntent(paymentIntentId) {
   }
 
   return stripe.paymentIntents.retrieve(paymentIntentId);
+}
+
+export async function createHelcimCheckoutSession({
+  amount,
+  currency,
+  orderReference,
+}) {
+  if (!isHelcimConfigured) {
+    throw new Error('Helcim is not configured yet.');
+  }
+
+  const response = await fetch(`${env.helcimApiBaseUrl.replace(/\/$/, '')}/v2/helcim-pay/initialize`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'api-token': env.helcimApiToken,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      paymentType: 'purchase',
+      paymentMethod: 'cc',
+      amount: Number((amount / 100).toFixed(2)),
+      currency,
+      confirmationScreen: false,
+      displayContactFields: 0,
+      invoiceNumber: orderReference,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload?.checkoutToken || !payload?.secretToken) {
+    throw new Error(payload?.message || 'Unable to start Helcim checkout right now.');
+  }
+
+  return payload;
+}
+
+export function validateHelcimPayResponse({ transactionData, receivedHash, secretToken }) {
+  const normalizedPayload = normalizeHelcimHashPayload(transactionData);
+  const generatedHash = crypto
+    .createHash('sha256')
+    .update(`${normalizedPayload}${secretToken}`)
+    .digest('hex');
+
+  return generatedHash === String(receivedHash || '').toLowerCase();
 }
 
 export function getManualPaymentInstructions(paymentMethod, options = {}) {

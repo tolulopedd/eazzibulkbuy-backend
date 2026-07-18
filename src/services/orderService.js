@@ -1,9 +1,11 @@
 import { prisma } from '../config/prisma.js';
 import { env } from '../config/env.js';
-import { isS3Configured, isStripeConfigured } from '../config/env.js';
+import { isHelcimConfigured, isS3Configured, isStripeConfigured } from '../config/env.js';
 import { createStripePaymentIntent } from './paymentService.js';
+import { createHelcimCheckoutSession } from './paymentService.js';
 import { getManualPaymentInstructions } from './paymentService.js';
 import { retrieveStripePaymentIntent } from './paymentService.js';
+import { validateHelcimPayResponse } from './paymentService.js';
 import { sendOrderPaidEmail } from './emailService.js';
 import { formatDisplayOrderReference } from '../utils/orderReference.js';
 import {
@@ -132,6 +134,10 @@ function calculateOrderTotalAmount({ subtotal, deliveryFee, paymentMethod }) {
   };
 }
 
+function isCardPaymentMethod(paymentMethod) {
+  return paymentMethod === 'STRIPE_CARD' || paymentMethod === 'HELCIM_CARD';
+}
+
 async function reserveNextOrderSequence(tx, salesItemId) {
   await tx.$queryRaw`SELECT "id" FROM "sales_items" WHERE "id" = ${salesItemId} FOR UPDATE`;
   const result = await tx.$queryRaw`SELECT COALESCE(MAX("order_sequence"), 0) AS "maxSequence" FROM "orders" WHERE "sales_item_id" = ${salesItemId}`;
@@ -184,7 +190,7 @@ export async function createPendingOrder(payload) {
   const deliveryFee = calculateGroupedDeliveryFee(orderLines);
   const storedPaymentMethod = paymentMethod || 'STRIPE_CARD';
   const hasExplicitPaymentMethod = Boolean(paymentMethod);
-  const isManualFlow = hasExplicitPaymentMethod && paymentMethod !== 'STRIPE_CARD';
+  const isManualFlow = hasExplicitPaymentMethod && !isCardPaymentMethod(paymentMethod);
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
   const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
     subtotal,
@@ -340,7 +346,7 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
     throw new Error('Payment method cannot be changed after payment is confirmed.');
   }
 
-  const isManualFlow = paymentMethod !== 'STRIPE_CARD';
+  const isManualFlow = !isCardPaymentMethod(paymentMethod);
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
   const manualInstructions = isManualFlow
     ? getManualPaymentInstructions(paymentMethod, {
@@ -446,6 +452,69 @@ export async function createOrderPaymentIntent(orderReference) {
       orderSequence: order.orderSequence,
     }),
     clientSecret: paymentIntent.client_secret,
+  };
+}
+
+export async function createOrderHelcimCheckoutSession(orderReference) {
+  const order = await prisma.order.findUnique({
+    where: { orderReference },
+    include: { user: true, salesItem: true, payment: true },
+  });
+
+  if (!order) {
+    throw new Error('Order not found');
+  }
+
+  if (order.paymentMethod !== 'HELCIM_CARD') {
+    throw new Error('Helcim checkout is only available for Helcim card payments.');
+  }
+
+  if (!isHelcimConfigured) {
+    throw new Error('Helcim is not configured yet.');
+  }
+
+  if (order.paymentStatus === 'PAID' || order.status === 'CONFIRMED') {
+    throw new Error('Payment is already confirmed for this order.');
+  }
+
+  const checkoutSession = await createHelcimCheckoutSession({
+    amount: order.totalAmount,
+    currency: order.currency,
+    orderReference: formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
+  });
+
+  const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
+    ? order.payment.providerPayloadJson
+    : {};
+
+  await prisma.payment.update({
+    where: { orderId: order.id },
+    data: {
+      providerReference: checkoutSession.checkoutToken,
+      providerPayloadJson: {
+        ...existingPayload,
+        helcimCheckout: {
+          checkoutToken: checkoutSession.checkoutToken,
+          secretToken: checkoutSession.secretToken,
+          initializedAt: new Date().toISOString(),
+        },
+      },
+    },
+  });
+
+  return {
+    orderId: order.id,
+    orderReference: order.orderReference,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: order.createdAt,
+      batchNumber: order.salesItem?.batchNumber,
+      orderSequence: order.orderSequence,
+    }),
+    checkoutToken: checkoutSession.checkoutToken,
   };
 }
 
@@ -674,6 +743,103 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
     orderReference,
     providerReference: paymentIntent.id,
     payload: paymentIntent,
+  });
+
+  return {
+    orderReference: confirmedOrder.orderReference,
+    createdAt: confirmedOrder.createdAt,
+    displayOrderReference: formatDisplayOrderReference({
+      createdAt: confirmedOrder.createdAt,
+      batchNumber: confirmedOrder.salesItem?.batchNumber,
+      orderSequence: confirmedOrder.orderSequence,
+    }),
+    paidAt: confirmedOrder.paidAt,
+    emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
+  };
+}
+
+export async function confirmHelcimPaymentByReference({ orderReference, checkoutToken, transactionResponse }) {
+  const order = await prisma.order.findUnique({
+    where: { orderReference },
+    include: { payment: true, salesItem: true },
+  });
+
+  if (!order) {
+    throw new Error('Order not found');
+  }
+
+  if (order.paymentMethod !== 'HELCIM_CARD') {
+    throw new Error('Helcim confirmation is only available for Helcim card orders.');
+  }
+
+  if (order.paymentStatus === 'PAID' || order.status === 'CONFIRMED') {
+    return {
+      orderReference: order.orderReference,
+      createdAt: order.createdAt,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
+      alreadyConfirmed: true,
+      emailSent: false,
+    };
+  }
+
+  const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
+    ? order.payment.providerPayloadJson
+    : {};
+  const storedCheckout = existingPayload.helcimCheckout || {};
+
+  if (!storedCheckout.secretToken || !storedCheckout.checkoutToken) {
+    throw new Error('Helcim checkout session was not initialized for this order.');
+  }
+
+  if (storedCheckout.checkoutToken !== checkoutToken) {
+    throw new Error('Helcim checkout token does not match this order.');
+  }
+
+  const transactionData = transactionResponse?.data;
+  const transactionHash = transactionResponse?.hash;
+
+  if (!transactionData || !transactionHash) {
+    throw new Error('Helcim payment response is incomplete.');
+  }
+
+  const isValid = validateHelcimPayResponse({
+    transactionData,
+    receivedHash: transactionHash,
+    secretToken: storedCheckout.secretToken,
+  });
+
+  if (!isValid) {
+    throw new Error('Helcim payment response could not be validated.');
+  }
+
+  if (String(transactionData.currency || '').toUpperCase() !== String(order.currency || '').toUpperCase()) {
+    throw new Error('Helcim payment currency does not match this order.');
+  }
+
+  const helcimAmountCents = Math.round(Number(transactionData.amount || 0) * 100);
+  if (helcimAmountCents !== order.totalAmount) {
+    throw new Error('Helcim payment amount does not match this order.');
+  }
+
+  if (String(transactionData.status || '').toUpperCase() !== 'APPROVED') {
+    throw new Error('Helcim payment has not been approved yet.');
+  }
+
+  const confirmedOrder = await markOrderPaidByReference({
+    orderReference,
+    providerReference: String(transactionData.transactionId || checkoutToken),
+    payload: {
+      ...existingPayload,
+      helcimCheckout: {
+        ...storedCheckout,
+        validatedAt: new Date().toISOString(),
+      },
+      helcimTransaction: transactionResponse,
+    },
   });
 
   return {

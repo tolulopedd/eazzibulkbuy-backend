@@ -111,6 +111,41 @@ export async function sendOrderPaidEmail({
   });
 }
 
+export async function sendOrderFulfillmentCompletedEmail({
+  email,
+  firstName,
+  displayOrderReference,
+  itemName,
+  quantity,
+  fulfillmentMethod,
+}) {
+  const isDelivery = fulfillmentMethod === 'DELIVERY';
+  const actionLabel = isDelivery ? 'delivered' : 'picked up';
+
+  await sendMail({
+    to: email,
+    subject: isDelivery ? 'Order Delivery Confirmed' : 'Order Pickup Confirmed',
+    text: [
+      `Hello ${firstName},`,
+      '',
+      `Your order item has been ${actionLabel} successfully.`,
+      '',
+      `Order reference: ${displayOrderReference}`,
+      `Item: ${itemName}`,
+      `Quantity: ${quantity}`,
+      '',
+      isDelivery
+        ? 'This confirms that your order has been delivered.'
+        : 'This confirms that your order has been picked up.',
+      '',
+      'Thank you for choosing EazziBulkBuy.',
+      '',
+      'Regards,',
+      'EazziBulkBuy.',
+    ].join('\n'),
+  });
+}
+
 export async function sendBuyerWelcomeEmail({ email, buyerName }) {
   await sendMail({
     to: email,

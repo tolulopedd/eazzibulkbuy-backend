@@ -2,9 +2,11 @@ import { Router } from 'express';
 import {
   createOrderHandler,
   createPaymentIntentHandler,
+  createHelcimCheckoutHandler,
   setOrderPaymentMethodHandler,
   confirmManualTransferHandler,
   confirmCardPaymentHandler,
+  confirmHelcimPaymentHandler,
   createManualTransferUploadHandler,
 } from '../controllers/orderController.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
@@ -40,10 +42,21 @@ const manualTransferUploadRateLimiter = createRateLimiter({
   max: 30,
   keyPrefix: 'manual-transfer-upload-url',
 });
+const helcimCheckoutRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyPrefix: 'helcim-checkout-session',
+});
+const helcimConfirmRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyPrefix: 'helcim-payment-confirmation',
+});
 
 router.post('/', createOrderRateLimiter, createOrderHandler);
 router.patch('/:orderReference/payment-method', paymentMethodRateLimiter, setOrderPaymentMethodHandler);
 router.post('/:orderReference/payment-intent', paymentIntentRateLimiter, createPaymentIntentHandler);
+router.post('/:orderReference/helcim-checkout-session', helcimCheckoutRateLimiter, createHelcimCheckoutHandler);
 router.post(
   '/:orderReference/manual-transfer-upload-url',
   manualTransferUploadRateLimiter,
@@ -58,6 +71,11 @@ router.post(
   '/:orderReference/card-payment-confirmation',
   cardConfirmRateLimiter,
   confirmCardPaymentHandler,
+);
+router.post(
+  '/:orderReference/helcim-payment-confirmation',
+  helcimConfirmRateLimiter,
+  confirmHelcimPaymentHandler,
 );
 
 export default router;

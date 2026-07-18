@@ -6,6 +6,7 @@ import {
   markOrderPaidByReference,
   resendOrderPaymentConfirmationByReference,
 } from '../services/orderService.js';
+import { sendOrderFulfillmentCompletedEmail } from '../services/emailService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 
 function isOrderPaidLike(order) {
@@ -92,12 +93,21 @@ function includesInsensitive(value, query) {
   return String(value || '').toLowerCase().includes(String(query || '').toLowerCase());
 }
 
+function parseBatchNumberFilters(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 function orderMatchesBatchNumber(order, batchNumber) {
-  if (!batchNumber) {
+  const batchFilters = parseBatchNumberFilters(batchNumber);
+
+  if (!batchFilters.length) {
     return true;
   }
 
-  return getOrderBatchNumbers(order).some((value) => includesInsensitive(value, batchNumber));
+  return getOrderBatchNumbers(order).some((value) => batchFilters.some((batch) => includesInsensitive(value, batch)));
 }
 
 function orderMatchesSalesItemId(order, salesItemId) {
@@ -150,6 +160,38 @@ function orderMatchesFulfillmentFilters(order, { fulfillmentMethod, fulfillmentS
 
     return true;
   });
+}
+
+function orderMatchesDateRange(order, { startDate, endDate }) {
+  if (!startDate && !endDate) {
+    return true;
+  }
+
+  const effectiveDate = order.paidAt || order.createdAt;
+  if (!effectiveDate) {
+    return false;
+  }
+
+  const effectiveTime = new Date(effectiveDate).getTime();
+  if (Number.isNaN(effectiveTime)) {
+    return false;
+  }
+
+  if (startDate) {
+    const startTime = new Date(startDate).getTime();
+    if (!Number.isNaN(startTime) && effectiveTime < startTime) {
+      return false;
+    }
+  }
+
+  if (endDate) {
+    const endTime = new Date(endDate).getTime();
+    if (!Number.isNaN(endTime) && effectiveTime > endTime) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function getDefaultItemFulfillmentStatus(order, item = {}) {
@@ -389,7 +431,7 @@ const updateSalesItemSchema = z.object({
 
 const listSalesItemsQuerySchema = z.object({
   q: z.string().trim().max(120).optional(),
-  batchNumber: z.string().trim().max(3).optional(),
+  batchNumber: z.string().trim().max(120).optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
   sortBy: z.enum(['createdAt', 'closingDate', 'name', 'batchNumber', 'pricePerUnit', 'status']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
@@ -419,8 +461,10 @@ const updateCustomerSchema = z.object({
 });
 
 const listOrdersQuerySchema = z.object({
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
   q: z.string().trim().max(120).optional(),
-  batchNumber: z.string().trim().max(3).optional(),
+  batchNumber: z.string().trim().max(120).optional(),
   paidOnly: z
     .enum(['true', 'false'])
     .optional()
@@ -446,7 +490,7 @@ const adminReportsQuerySchema = z.object({
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
   salesItemId: z.string().uuid().optional(),
-  batchNumber: z.string().trim().max(3).optional(),
+  batchNumber: z.string().trim().max(120).optional(),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
   reportType: z
@@ -1082,10 +1126,10 @@ export async function exportReportsHandler(req, res, next) {
 
     const fileBase =
       reportType === 'supplierOrders'
-        ? 'items-to-order-from-supplier-paid'
+        ? 'items-to-order-from-supplier-paid-report'
         : reportType === 'salesDetails'
           ? 'sales-details-report'
-          : 'order-ready-paid';
+          : 'order-ready-paid-report';
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fileBase}-${new Date().toISOString().slice(0, 10)}.csv"`);
@@ -1386,7 +1430,6 @@ export async function listOrdersHandler(req, res, next) {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
-      ...(query.paidOnly === true ? { paymentStatus: 'PAID' } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -1490,6 +1533,11 @@ export async function listOrdersHandler(req, res, next) {
         fulfillmentItems,
       };
     }).filter((order) =>
+      orderMatchesDateRange(order, {
+        startDate: query.startDate,
+        endDate: query.endDate,
+      }) &&
+      (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -1516,17 +1564,14 @@ export async function listOrdersHandler(req, res, next) {
 
 export async function exportOrdersHandler(req, res, next) {
   try {
-    const query = listOrdersQuerySchema.parse({
-      ...req.query,
-      page: 1,
-      limit: 1000,
-    });
+    const query = listOrdersQuerySchema
+      .omit({ page: true, limit: true })
+      .parse(req.query);
 
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
-      ...(query.paidOnly === true ? { paymentStatus: 'PAID' } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -1554,7 +1599,20 @@ export async function exportOrdersHandler(req, res, next) {
       },
     });
 
-    const filteredOrders = orders.filter((order) =>
+    const normalizedOrders = orders.map((order) => {
+      const fulfillmentItems = normalizeFulfillmentItems(order);
+      return {
+        ...order,
+        fulfillmentItems,
+      };
+    });
+
+    const filteredOrders = normalizedOrders.filter((order) =>
+      orderMatchesDateRange(order, {
+        startDate: query.startDate,
+        endDate: query.endDate,
+      }) &&
+      (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -1792,6 +1850,39 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
     });
 
     const fulfillmentItems = normalizeFulfillmentItems(updatedOrder);
+    const completedItem = payload.itemIndex !== undefined
+      ? fulfillmentItems.find((item) => item.itemIndex === payload.itemIndex)
+      : fulfillmentItems[0];
+
+    let fulfillmentEmailSent = false;
+
+    if (
+      completedItem &&
+      updatedOrder.user?.email &&
+      (payload.fulfillmentStatus === 'PICKED_UP' || payload.fulfillmentStatus === 'DELIVERED')
+    ) {
+      try {
+        await sendOrderFulfillmentCompletedEmail({
+          email: updatedOrder.user.email,
+          firstName: updatedOrder.user.firstName || updatedOrder.user.name || 'Customer',
+          displayOrderReference: formatDisplayOrderReference({
+            createdAt: updatedOrder.createdAt,
+            batchNumber: updatedOrder.salesItem?.batchNumber,
+            orderSequence: updatedOrder.orderSequence,
+          }),
+          itemName: completedItem.name,
+          quantity: completedItem.quantity,
+          fulfillmentMethod: completedItem.fulfillmentMethod,
+        });
+        fulfillmentEmailSent = true;
+      } catch (error) {
+        console.error('Failed to send fulfilment completion email', {
+          orderReference: updatedOrder.orderReference,
+          itemIndex: completedItem.itemIndex,
+          error: error?.message,
+        });
+      }
+    }
 
     return res.json({
       message: payload.fulfillmentStatus === 'PICKED_UP'
@@ -1799,6 +1890,7 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
         : payload.fulfillmentStatus === 'DELIVERED'
           ? 'Delivery confirmed successfully.'
           : 'Fulfilment status updated successfully.',
+      emailSent: fulfillmentEmailSent,
       order: {
         ...updatedOrder,
         fulfillmentItems,

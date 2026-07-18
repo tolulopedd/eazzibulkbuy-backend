@@ -5,12 +5,16 @@ import {
   confirmCardPaymentSchema,
   createManualTransferUploadSchema,
   setOrderPaymentMethodSchema,
+  createHelcimCheckoutSchema,
+  confirmHelcimPaymentSchema,
 } from '../utils/validators.js';
 import {
   createPendingOrder,
   createOrderPaymentIntent,
+  createOrderHelcimCheckoutSession,
   confirmManualTransferByReference,
   confirmCardPaymentByReference,
+  confirmHelcimPaymentByReference,
   createManualTransferUploadByReference,
   setOrderPaymentMethodByReference,
 } from '../services/orderService.js';
@@ -29,6 +33,16 @@ export async function createPaymentIntentHandler(req, res, next) {
   try {
     const payload = createPaymentIntentSchema.parse({ orderReference: req.params.orderReference });
     const result = await createOrderPaymentIntent(payload.orderReference);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createHelcimCheckoutHandler(req, res, next) {
+  try {
+    const payload = createHelcimCheckoutSchema.parse({ orderReference: req.params.orderReference });
+    const result = await createOrderHelcimCheckoutSession(payload.orderReference);
     res.json(result);
   } catch (error) {
     next(error);
@@ -83,6 +97,20 @@ export async function confirmCardPaymentHandler(req, res, next) {
       paymentIntentId: req.body.paymentIntentId,
     });
     const result = await confirmCardPaymentByReference(payload);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function confirmHelcimPaymentHandler(req, res, next) {
+  try {
+    const payload = confirmHelcimPaymentSchema.parse({
+      orderReference: req.params.orderReference,
+      checkoutToken: req.body.checkoutToken,
+      transactionResponse: req.body.transactionResponse,
+    });
+    const result = await confirmHelcimPaymentByReference(payload);
     res.json(result);
   } catch (error) {
     next(error);
