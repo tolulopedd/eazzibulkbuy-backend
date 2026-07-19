@@ -117,31 +117,25 @@ export async function sendOrderFulfillmentCompletedEmail({
   displayOrderReference,
   itemName,
   quantity,
-  fulfillmentMethod,
 }) {
-  const isDelivery = fulfillmentMethod === 'DELIVERY';
-  const actionLabel = isDelivery ? 'delivered' : 'picked up';
-
   await sendMail({
     to: email,
-    subject: isDelivery ? 'Order Delivery Confirmed' : 'Order Pickup Confirmed',
+    subject: 'Order Receipt/Delivery',
     text: [
       `Hello ${firstName},`,
       '',
-      `Your order item has been ${actionLabel} successfully.`,
+      'Your order has been picked up successfully.',
       '',
       `Order reference: ${displayOrderReference}`,
-      `Item: ${itemName}`,
+      `Item(s): ${itemName}`,
       `Quantity: ${quantity}`,
       '',
-      isDelivery
-        ? 'This confirms that your order has been delivered.'
-        : 'This confirms that your order has been picked up.',
+      'Kindly confirm your order carefully before leaving the pickup location. Due to the nature of our fresh farm produce, all sales are final and items returned after pickup or delivery will not be accepted.',
       '',
-      'Thank you for choosing EazziBulkBuy.',
+      'Thank you for your understanding and continued patronage.',
       '',
-      'Regards,',
-      'EazziBulkBuy.',
+      'Regards',
+      'EazziBulkBuy',
     ].join('\n'),
   });
 }
