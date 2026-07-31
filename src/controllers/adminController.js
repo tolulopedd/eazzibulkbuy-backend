@@ -1005,7 +1005,7 @@ async function buildAdminReportsData(query) {
       return a.batchNumber.localeCompare(b.batchNumber);
     });
 
-    const salesDetailRows = normalizedOrders.map((order) => {
+    const salesDetailRows = paidOrders.map((order) => {
       const orderDetails = [
         order.user?.name || 'Unknown buyer',
         order.itemDetails.map((item) => `${item.name} x${item.quantity}`).join(', '),
