@@ -60,6 +60,12 @@ enum FulfillmentStatus {
   DELIVERED
 }
 
+enum CustomerUpdateRequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
 model User {
   id                  String    @id @default(uuid())
   name                String    @map("name")
@@ -83,6 +89,8 @@ model User {
   inviteTokenExpiresAt DateTime? @map("invite_token_expires_at")
   lastLoginAt         DateTime? @map("last_login_at")
   orders              Order[]
+  customerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestCustomer")
+  reviewedCustomerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestReviewer")
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
@@ -175,4 +183,23 @@ model Payment {
   providerPayloadJson Json?
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
+}
+
+model CustomerUpdateRequest {
+  id            String                      @id @default(uuid())
+  userId        String                      @map("user_id")
+  user          User                        @relation("CustomerUpdateRequestCustomer", fields: [userId], references: [id], onDelete: Cascade)
+  phone         String?                     @map("phone")
+  address       String?                     @map("address")
+  city          String?                     @map("city")
+  province      String?                     @map("province")
+  postalCode    String?                     @map("postal_code")
+  status        CustomerUpdateRequestStatus @default(PENDING) @map("status")
+  reviewedAt    DateTime?                   @map("reviewed_at")
+  reviewedByUserId String?                  @map("reviewed_by_user_id")
+  reviewedBy    User?                       @relation("CustomerUpdateRequestReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  createdAt     DateTime                    @default(now()) @map("created_at")
+  updatedAt     DateTime                    @updatedAt @map("updated_at")
+
+  @@map("customer_update_requests")
 }

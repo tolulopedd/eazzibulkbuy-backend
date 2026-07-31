@@ -6,6 +6,11 @@ import {
   markOrderPaidByReference,
   resendOrderPaymentConfirmationByReference,
 } from '../services/orderService.js';
+import {
+  buildStoredTransferProof,
+  createTransferProofUploadTarget,
+  isValidReceiptObjectKey,
+} from '../services/storageService.js';
 import { sendOrderFulfillmentCompletedEmail } from '../services/emailService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 
@@ -458,6 +463,28 @@ const updateCustomerSchema = z.object({
   phone: z.string().trim().max(40).nullable().optional(),
   address: z.string().trim().max(255).nullable().optional(),
   isActive: z.boolean(),
+});
+
+const reviewCustomerUpdateRequestSchema = z.object({
+  requestId: z.string().uuid(),
+});
+
+const adminIncompleteOrderUploadSchema = z.object({
+  orderReference: z.string().uuid(),
+  fileName: z.string().trim().min(3).max(180),
+  contentType: z.string().trim().regex(/^image\/[a-zA-Z0-9.+-]+$/),
+  sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
+});
+
+const adminIncompleteOrderReviewSchema = z.object({
+  orderReference: z.string().uuid(),
+  comment: z.string().trim().min(3).max(500),
+  transferProof: z.object({
+    fileName: z.string().trim().min(3).max(180),
+    contentType: z.string().trim().regex(/^image\/[a-zA-Z0-9.+-]+$/),
+    sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
+    objectKey: z.string().trim().min(10).max(300),
+  }),
 });
 
 const listOrdersQuerySchema = z.object({
@@ -1217,9 +1244,42 @@ export async function listCustomersHandler(req, res, next) {
     ]);
 
     const userIds = users.map((user) => user.id);
+    const pendingUpdateRequests = await prisma.customerUpdateRequest.findMany({
+      where: { status: 'PENDING' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        phone: true,
+        address: true,
+        city: true,
+        province: true,
+        postalCode: true,
+        status: true,
+        createdAt: true,
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+
     if (userIds.length === 0) {
       return res.json({
         items: [],
+        pendingUpdateRequests: pendingUpdateRequests.map((request) => ({
+          id: request.id,
+          status: request.status,
+          createdAt: request.createdAt,
+          phone: request.phone,
+          address: request.address,
+          city: request.city,
+          province: request.province,
+          postalCode: request.postalCode,
+          customer: request.user,
+        })),
         page: query.page,
         limit: query.limit,
         total,
@@ -1293,6 +1353,17 @@ export async function listCustomersHandler(req, res, next) {
           lastOrderAt: lastOrderByUserId.get(user.id) || null,
         };
       }),
+      pendingUpdateRequests: pendingUpdateRequests.map((request) => ({
+        id: request.id,
+        status: request.status,
+        createdAt: request.createdAt,
+        phone: request.phone,
+        address: request.address,
+        city: request.city,
+        province: request.province,
+        postalCode: request.postalCode,
+        customer: request.user,
+      })),
       page: query.page,
       limit: query.limit,
       total,
@@ -1353,6 +1424,91 @@ export async function updateCustomerHandler(req, res, next) {
       message: 'Customer updated successfully.',
       customer: updatedCustomer,
     });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function approveCustomerUpdateRequestHandler(req, res, next) {
+  try {
+    const { requestId } = reviewCustomerUpdateRequestSchema.parse(req.params);
+
+    const existingRequest = await prisma.customerUpdateRequest.findUnique({
+      where: { id: requestId },
+      select: {
+        id: true,
+        status: true,
+        userId: true,
+        phone: true,
+        address: true,
+        city: true,
+        province: true,
+        postalCode: true,
+      },
+    });
+
+    if (!existingRequest) {
+      return res.status(404).json({ message: 'Customer update request not found.' });
+    }
+
+    if (existingRequest.status !== 'PENDING') {
+      return res.status(409).json({ message: 'This customer update request has already been reviewed.' });
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: existingRequest.userId },
+        data: {
+          phone: existingRequest.phone,
+          address: existingRequest.address,
+          city: existingRequest.city,
+          province: existingRequest.province,
+          postalCode: existingRequest.postalCode,
+        },
+      }),
+      prisma.customerUpdateRequest.update({
+        where: { id: requestId },
+        data: {
+          status: 'APPROVED',
+          reviewedAt: new Date(),
+          reviewedByUserId: req.admin.userId,
+        },
+      }),
+    ]);
+
+    return res.json({ message: 'Customer update approved successfully.' });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function declineCustomerUpdateRequestHandler(req, res, next) {
+  try {
+    const { requestId } = reviewCustomerUpdateRequestSchema.parse(req.params);
+
+    const existingRequest = await prisma.customerUpdateRequest.findUnique({
+      where: { id: requestId },
+      select: { id: true, status: true },
+    });
+
+    if (!existingRequest) {
+      return res.status(404).json({ message: 'Customer update request not found.' });
+    }
+
+    if (existingRequest.status !== 'PENDING') {
+      return res.status(409).json({ message: 'This customer update request has already been reviewed.' });
+    }
+
+    await prisma.customerUpdateRequest.update({
+      where: { id: requestId },
+      data: {
+        status: 'DECLINED',
+        reviewedAt: new Date(),
+        reviewedByUserId: req.admin.userId,
+      },
+    });
+
+    return res.json({ message: 'Customer update declined successfully.' });
   } catch (error) {
     next(error);
   }
@@ -1942,6 +2098,172 @@ export async function confirmInteracPaymentHandler(req, res, next) {
       status: confirmedOrder.status,
       paymentStatus: confirmedOrder.paymentStatus,
       emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createAdminIncompleteOrderUploadHandler(req, res, next) {
+  try {
+    const payload = adminIncompleteOrderUploadSchema.parse({
+      orderReference: req.params.orderReference,
+      fileName: req.body.fileName,
+      contentType: req.body.contentType,
+      sizeBytes: req.body.sizeBytes,
+    });
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference: payload.orderReference },
+      select: {
+        orderReference: true,
+        paymentStatus: true,
+        status: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (isOrderPaidLike(order)) {
+      return res.status(409).json({ message: 'This order has already been paid and cannot accept a recovery receipt.' });
+    }
+
+    if (order.paymentStatus !== 'PENDING_PAYMENT') {
+      return res.status(409).json({ message: 'Only incomplete orders can accept an admin-uploaded Interac receipt.' });
+    }
+
+    if (order.paymentMethod !== 'INTERAC_E_TRANSFER') {
+      return res.status(409).json({ message: 'Admin receipt upload is only available for incomplete Interac e-Transfer orders.' });
+    }
+
+    const uploadTarget = await createTransferProofUploadTarget({
+      orderReference: payload.orderReference,
+      fileName: payload.fileName,
+      contentType: payload.contentType,
+    });
+
+    return res.json({
+      ...uploadTarget,
+      fileName: payload.fileName,
+      contentType: payload.contentType,
+      sizeBytes: payload.sizeBytes,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function markIncompleteOrderPendingReviewHandler(req, res, next) {
+  try {
+    const payload = adminIncompleteOrderReviewSchema.parse({
+      orderReference: req.params.orderReference,
+      comment: req.body.comment,
+      transferProof: req.body.transferProof,
+    });
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference: payload.orderReference },
+      include: {
+        payment: true,
+        salesItem: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (isOrderPaidLike(order)) {
+      return res.status(409).json({ message: 'This order has already been paid and cannot be moved to pending review.' });
+    }
+
+    if (order.paymentStatus !== 'PENDING_PAYMENT') {
+      return res.status(409).json({ message: 'Only incomplete orders can be moved to pending review.' });
+    }
+
+    if (order.paymentMethod !== 'INTERAC_E_TRANSFER') {
+      return res.status(409).json({ message: 'Only incomplete Interac e-Transfer orders can be moved to pending review.' });
+    }
+
+    if (!isValidReceiptObjectKey(payload.orderReference, payload.transferProof.objectKey)) {
+      return res.status(409).json({ message: 'Uploaded receipt does not match this order.' });
+    }
+
+    const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
+      ? order.payment.providerPayloadJson
+      : {};
+
+    const storedTransferProof = buildStoredTransferProof(payload.transferProof);
+
+    await prisma.order.update({
+      where: { orderReference: payload.orderReference },
+      data: {
+        status: 'AWAITING_MANUAL_PAYMENT',
+        paymentStatus: 'PENDING_REVIEW',
+        payment: {
+          update: {
+            status: 'PENDING_REVIEW',
+            providerPayloadJson: {
+              ...existingPayload,
+              transferProof: storedTransferProof,
+              adminRecovery: {
+                comment: payload.comment,
+                updatedByUserId: req.admin.userId,
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return res.json({
+      message: 'Incomplete order moved to pending review successfully.',
+      orderReference: order.orderReference,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
+      status: 'AWAITING_MANUAL_PAYMENT',
+      paymentStatus: 'PENDING_REVIEW',
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteIncompleteOrderHandler(req, res, next) {
+  try {
+    const orderReference = z.string().uuid().parse(req.params.orderReference);
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference },
+      select: {
+        id: true,
+        orderReference: true,
+        paymentStatus: true,
+        status: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (isOrderPaidLike(order) || order.paymentStatus === 'PENDING_REVIEW') {
+      return res.status(409).json({ message: 'Only incomplete orders can be deleted here.' });
+    }
+
+    await prisma.order.delete({
+      where: { orderReference },
+    });
+
+    return res.json({
+      message: 'Incomplete order deleted successfully.',
+      orderReference,
     });
   } catch (error) {
     next(error);

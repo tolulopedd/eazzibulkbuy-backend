@@ -2,15 +2,16 @@ import { z } from 'zod';
 import { sanitizeEmail, sanitizeText } from './sanitize.js';
 
 export const createOrderSchema = z.object({
+  existingCustomerId: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().uuid().optional()),
   title: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.enum(['Mr', 'Mrs', 'Miss']).optional()),
-  firstName: z.preprocess((v) => sanitizeText(v), z.string().min(2).max(80)),
-  lastName: z.preprocess((v) => sanitizeText(v), z.string().min(2).max(80)),
-  email: z.preprocess((v) => sanitizeEmail(v), z.string().email()),
-  phone: z.preprocess((v) => sanitizeText(v), z.string().min(7).max(30)),
-  address: z.preprocess((v) => sanitizeText(v), z.string().min(5).max(250)),
-  city: z.preprocess((v) => sanitizeText(v), z.string().min(2).max(120)),
-  province: z.preprocess((v) => sanitizeText(v), z.string().min(2).max(120)),
-  postalCode: z.preprocess((v) => sanitizeText(v), z.string().min(3).max(20)),
+  firstName: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(80).optional()),
+  lastName: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(80).optional()),
+  email: z.preprocess((v) => (v === undefined ? undefined : sanitizeEmail(v)), z.string().email().optional()),
+  phone: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(7).max(30).optional()),
+  address: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(5).max(250).optional()),
+  city: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(120).optional()),
+  province: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(120).optional()),
+  postalCode: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(3).max(20).optional()),
   items: z.array(z.object({
     salesItemId: z.preprocess((v) => sanitizeText(v), z.string().min(1)),
     quantity: z.number().int().min(1),
@@ -21,6 +22,31 @@ export const createOrderSchema = z.object({
   paymentMethod: z
     .preprocess((v) => sanitizeText(v), z.enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY']))
     .optional(),
+}).superRefine((payload, ctx) => {
+  if (payload.existingCustomerId) {
+    return;
+  }
+
+  const requiredFields = [
+    ['firstName', payload.firstName],
+    ['lastName', payload.lastName],
+    ['email', payload.email],
+    ['phone', payload.phone],
+    ['address', payload.address],
+    ['city', payload.city],
+    ['province', payload.province],
+    ['postalCode', payload.postalCode],
+  ];
+
+  for (const [field, value] of requiredFields) {
+    if (!value) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: 'Required',
+      });
+    }
+  }
 });
 
 export const setOrderPaymentMethodSchema = z.object({

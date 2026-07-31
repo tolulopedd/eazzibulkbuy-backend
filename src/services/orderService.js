@@ -145,7 +145,20 @@ async function reserveNextOrderSequence(tx, salesItemId) {
 }
 
 export async function createPendingOrder(payload) {
-  const { title, firstName, lastName, email, phone, address, city, province, postalCode, items, paymentMethod } = payload;
+  const {
+    existingCustomerId,
+    title,
+    firstName,
+    lastName,
+    email,
+    phone,
+    address,
+    city,
+    province,
+    postalCode,
+    items,
+    paymentMethod,
+  } = payload;
   const name = buildBuyerName({ title, firstName, lastName });
   const uniqueSalesItemIds = [...new Set(items.map((item) => item.salesItemId))];
   const salesItems = await prisma.salesItem.findMany({
@@ -235,36 +248,55 @@ export async function createPendingOrder(payload) {
     .join(', ');
 
   const order = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.upsert({
-      where: { email },
-      update: {
-        name,
-        title: title ?? null,
-        firstName,
-        lastName,
-        phone,
-        address,
-        city,
-        province,
-        postalCode,
-      },
-      create: {
-        name,
-        title,
-        firstName,
-        lastName,
-        email,
-        role: 'USER',
-        phone,
-        address,
-        city,
-        province,
-        postalCode,
-      },
-      select: {
-        id: true,
-      },
-    });
+    let user;
+
+    if (existingCustomerId) {
+      user = await tx.user.findFirst({
+        where: {
+          id: existingCustomerId,
+          role: 'USER',
+          isActive: true,
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!user) {
+        throw new Error('Selected buyer could not be found.');
+      }
+    } else {
+      user = await tx.user.upsert({
+        where: { email },
+        update: {
+          name,
+          title: title ?? null,
+          firstName,
+          lastName,
+          phone,
+          address,
+          city,
+          province,
+          postalCode,
+        },
+        create: {
+          name,
+          title,
+          firstName,
+          lastName,
+          email,
+          role: 'USER',
+          phone,
+          address,
+          city,
+          province,
+          postalCode,
+        },
+        select: {
+          id: true,
+        },
+      });
+    }
 
     const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.id);
 

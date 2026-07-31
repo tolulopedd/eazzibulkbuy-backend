@@ -13,9 +13,14 @@ import {
   exportOrdersHandler,
   updateFulfillmentStatusHandler,
   confirmInteracPaymentHandler,
+  createAdminIncompleteOrderUploadHandler,
+  markIncompleteOrderPendingReviewHandler,
+  deleteIncompleteOrderHandler,
   paymentProofViewUrlHandler,
   resendPaymentConfirmationHandler,
   updateCustomerHandler,
+  approveCustomerUpdateRequestHandler,
+  declineCustomerUpdateRequestHandler,
   exportCustomersHandler,
 } from '../controllers/adminController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
@@ -42,11 +47,16 @@ router.get('/reports/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportRe
 router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomersHandler);
 router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportCustomersHandler);
 router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateCustomerHandler);
+router.post('/customers/update-requests/:requestId/approve', requireAdminRoles('ADMIN', 'SUPERADMIN'), approveCustomerUpdateRequestHandler);
+router.post('/customers/update-requests/:requestId/decline', requireAdminRoles('ADMIN', 'SUPERADMIN'), declineCustomerUpdateRequestHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
+router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminIncompleteOrderUploadHandler);
+router.post('/payments/:orderReference/mark-pending-review', requireAdminRoles('ADMIN', 'SUPERADMIN'), markIncompleteOrderPendingReviewHandler);
 router.post('/payments/:orderReference/confirm-interac', requireAdminRoles('ADMIN', 'SUPERADMIN'), confirmInteracPaymentHandler);
 router.post('/payments/:orderReference/resend-confirmation', requireAdminRoles('ADMIN', 'SUPERADMIN'), resendPaymentConfirmationHandler);
+router.delete('/payments/:orderReference/incomplete-order', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteIncompleteOrderHandler);
 
 export default router;

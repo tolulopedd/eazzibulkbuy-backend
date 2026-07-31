@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { saveCustomerDetailsHandler, searchCustomersHandler } from '../controllers/customerController.js';
+import { createCustomerUpdateRequestHandler, saveCustomerDetailsHandler, searchCustomersHandler } from '../controllers/customerController.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 
 const router = Router();
@@ -16,5 +16,6 @@ const saveRateLimiter = createRateLimiter({
 
 router.get('/search', searchRateLimiter, searchCustomersHandler);
 router.post('/save', saveRateLimiter, saveCustomerDetailsHandler);
+router.post('/:customerId/update-request', saveRateLimiter, createCustomerUpdateRequestHandler);
 
 export default router;
