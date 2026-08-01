@@ -1,13 +1,15 @@
 import { z } from 'zod';
 import { sanitizeEmail, sanitizeText } from './sanitize.js';
 
+const phoneSchema = z.string().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits.');
+
 export const createOrderSchema = z.object({
   existingCustomerId: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().uuid().optional()),
   title: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.enum(['Mr', 'Mrs', 'Miss']).optional()),
   firstName: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(80).optional()),
   lastName: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(80).optional()),
   email: z.preprocess((v) => (v === undefined ? undefined : sanitizeEmail(v)), z.string().email().optional()),
-  phone: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(7).max(30).optional()),
+  phone: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), phoneSchema.optional()),
   address: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(5).max(250).optional()),
   city: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(120).optional()),
   province: z.preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(120).optional()),

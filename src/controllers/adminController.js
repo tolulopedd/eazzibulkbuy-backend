@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '../config/prisma.js';
 import { formatDisplayOrderReference } from '../utils/orderReference.js';
 import {
+  createAdminDiscountOrder,
   getManualTransferProofViewUrlByReference,
   markOrderPaidByReference,
   resendOrderPaymentConfirmationByReference,
@@ -66,6 +67,11 @@ function parseOrderNotes(notes) {
 function getOrderSnapshotItems(order) {
   const snapshot = parseOrderNotes(order.notes);
   return Array.isArray(snapshot?.items) ? snapshot.items : [];
+}
+
+function getDiscountOrderMeta(order) {
+  const snapshot = parseOrderNotes(order.notes);
+  return snapshot?.meta?.discountOrder ? snapshot.meta : null;
 }
 
 function getOrderSalesItemIds(order) {
@@ -465,8 +471,41 @@ const updateCustomerSchema = z.object({
   isActive: z.boolean(),
 });
 
+const createAdminCustomerSchema = z.object({
+  title: z.enum(['Mr', 'Mrs', 'Miss']).optional(),
+  firstName: z.string().trim().min(2).max(80),
+  lastName: z.string().trim().min(2).max(80),
+  email: z.string().trim().email(),
+  phone: z.string().trim().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits.'),
+  address: z.string().trim().min(5).max(255),
+  city: z.string().trim().min(2).max(120),
+  province: z.string().trim().min(2).max(120),
+  postalCode: z.string().trim().min(3).max(20),
+});
+
 const reviewCustomerUpdateRequestSchema = z.object({
   requestId: z.string().uuid(),
+});
+
+const createDiscountOrderSchema = z.object({
+  customerId: z.string().uuid(),
+  salesItemId: z.string().uuid(),
+  quantity: z.number().int().min(1).max(500),
+  fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).default('PICKUP'),
+  discountedUnitPrice: z.number().int().positive(),
+  paymentMethod: z.enum(['INTERAC_E_TRANSFER']).default('INTERAC_E_TRANSFER'),
+  discountReason: z.string().trim().min(3).max(240),
+  adminComment: z.string().trim().max(500).optional(),
+});
+
+const listDiscountOrdersQuerySchema = z.object({
+  q: z.string().trim().max(120).optional(),
+  paymentStatus: z
+    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED'])
+    .optional(),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
 const adminIncompleteOrderUploadSchema = z.object({
@@ -1429,6 +1468,59 @@ export async function updateCustomerHandler(req, res, next) {
   }
 }
 
+export async function createAdminCustomerHandler(req, res, next) {
+  try {
+    const payload = createAdminCustomerSchema.parse(req.body);
+    const existingCustomer = await prisma.user.findUnique({
+      where: { email: payload.email },
+      select: { id: true },
+    });
+
+    if (existingCustomer) {
+      return res.status(409).json({ message: 'A customer with this email already exists.' });
+    }
+
+    const fullName = [payload.title, payload.firstName, payload.lastName].filter(Boolean).join(' ').trim();
+
+    const customer = await prisma.user.create({
+      data: {
+        name: fullName,
+        title: payload.title || null,
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        email: payload.email,
+        role: 'USER',
+        phone: payload.phone,
+        address: payload.address,
+        city: payload.city,
+        province: payload.province,
+        postalCode: payload.postalCode,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        address: true,
+        city: true,
+        province: true,
+        postalCode: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return res.status(201).json({
+      message: 'Customer created successfully.',
+      customer,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function approveCustomerUpdateRequestHandler(req, res, next) {
   try {
     const { requestId } = reviewCustomerUpdateRequestSchema.parse(req.params);
@@ -1509,6 +1601,111 @@ export async function declineCustomerUpdateRequestHandler(req, res, next) {
     });
 
     return res.json({ message: 'Customer update declined successfully.' });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listDiscountOrdersHandler(req, res, next) {
+  try {
+    const query = listDiscountOrdersQuerySchema.parse(req.query);
+    const orders = await prisma.order.findMany({
+      where: {
+        notes: { contains: '"discountOrder":true' },
+        ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
+      },
+      orderBy: { createdAt: query.sortOrder },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    const filteredOrders = orders.filter((order) => {
+      const discountMeta = getDiscountOrderMeta(order);
+      if (!discountMeta) {
+        return false;
+      }
+
+      if (!query.q) {
+        return true;
+      }
+
+      const haystack = [
+        order.user?.name,
+        order.user?.email,
+        order.user?.phone,
+        order.salesItem?.name,
+        order.salesItem?.batchNumber,
+        order.orderReference,
+        formatDisplayOrderReference({
+          createdAt: order.createdAt,
+          batchNumber: order.salesItem?.batchNumber,
+          orderSequence: order.orderSequence,
+        }),
+        discountMeta.discountReason,
+      ];
+
+      return haystack.some((value) => includesInsensitive(value, query.q));
+    });
+
+    const total = filteredOrders.length;
+    const skip = (query.page - 1) * query.limit;
+    const pagedOrders = filteredOrders.slice(skip, skip + query.limit).map((order) => ({
+      ...order,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
+      discountMeta: getDiscountOrderMeta(order),
+    }));
+
+    return res.json({
+      items: pagedOrders,
+      page: query.page,
+      limit: query.limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / query.limit)),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createDiscountOrderHandler(req, res, next) {
+  try {
+    const payload = createDiscountOrderSchema.parse(req.body);
+    const order = await createAdminDiscountOrder({
+      ...payload,
+      adminUserId: req.admin.userId,
+    });
+
+    return res.status(201).json({
+      message: 'Discount order created successfully.',
+      order,
+    });
   } catch (error) {
     next(error);
   }

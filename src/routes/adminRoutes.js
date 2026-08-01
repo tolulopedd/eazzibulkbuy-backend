@@ -3,6 +3,7 @@ import { requireAdminAuth, requireAdminRoles } from '../middleware/adminAuth.js'
 import { requireTrustedOrigin } from '../middleware/security.js';
 import {
   createSalesItemHandler,
+  createDiscountOrderHandler,
   adminReportsHandler,
   exportReportsHandler,
   listSalesItemsHandler,
@@ -19,9 +20,11 @@ import {
   paymentProofViewUrlHandler,
   resendPaymentConfirmationHandler,
   updateCustomerHandler,
+  createAdminCustomerHandler,
   approveCustomerUpdateRequestHandler,
   declineCustomerUpdateRequestHandler,
   exportCustomersHandler,
+  listDiscountOrdersHandler,
 } from '../controllers/adminController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
 
@@ -46,9 +49,12 @@ router.get('/reports', requireAdminRoles('ADMIN', 'SUPERADMIN'), adminReportsHan
 router.get('/reports/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportReportsHandler);
 router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomersHandler);
 router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportCustomersHandler);
+router.post('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminCustomerHandler);
 router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateCustomerHandler);
 router.post('/customers/update-requests/:requestId/approve', requireAdminRoles('ADMIN', 'SUPERADMIN'), approveCustomerUpdateRequestHandler);
 router.post('/customers/update-requests/:requestId/decline', requireAdminRoles('ADMIN', 'SUPERADMIN'), declineCustomerUpdateRequestHandler);
+router.get('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listDiscountOrdersHandler);
+router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), createDiscountOrderHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);

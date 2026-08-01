@@ -3,12 +3,14 @@ import { z } from 'zod';
 import { sanitizeEmail, sanitizeText } from '../utils/sanitize.js';
 import { sendBuyerWelcomeEmail } from '../services/emailService.js';
 
+const phoneSchema = z.string().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits.');
+
 const saveCustomerSchema = z.object({
   title: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.enum(['Mr', 'Mrs', 'Miss']).optional()),
   firstName: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(80)),
   lastName: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(80)),
   email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
-  phone: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(7).max(30).optional()),
+  phone: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), phoneSchema.optional()),
   address: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(5).max(250).optional()),
   city: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(2).max(120).optional()),
   province: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(2).max(120).optional()),
@@ -17,7 +19,7 @@ const saveCustomerSchema = z.object({
 
 const customerUpdateRequestSchema = z.object({
   customerId: z.preprocess((value) => sanitizeText(value), z.string().uuid()),
-  phone: z.preprocess((value) => sanitizeText(value), z.string().min(7).max(30)),
+  phone: z.preprocess((value) => sanitizeText(value), phoneSchema),
   address: z.preprocess((value) => sanitizeText(value), z.string().min(5).max(250)),
   city: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(120)),
   province: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(120)),
@@ -28,16 +30,14 @@ export async function searchCustomersHandler(req, res, next) {
   try {
     const q = sanitizeText(req.query.q || '');
 
-    if (q.length < 4) {
+    if (q.length < 5) {
       return res.json([]);
     }
 
-    const normalizedQuery = q.trim();
-    const compactDigits = normalizedQuery.replace(/\D/g, '');
+    const normalizedQuery = q.trim().toLowerCase();
     const isEmailSearch = normalizedQuery.includes('@');
-    const isPhoneSearch = compactDigits.length >= 7;
 
-    if (!isEmailSearch && !isPhoneSearch) {
+    if (!isEmailSearch) {
       return res.json([]);
     }
 
@@ -45,15 +45,14 @@ export async function searchCustomersHandler(req, res, next) {
       where: {
         role: 'USER',
         isActive: true,
-        ...(isEmailSearch
-          ? { email: { contains: normalizedQuery, mode: 'insensitive' } }
-          : { phone: { contains: compactDigits } }),
+        email: { equals: normalizedQuery, mode: 'insensitive' },
       },
       take: 10,
       orderBy: { updatedAt: 'desc' },
       select: {
         id: true,
         name: true,
+        email: true,
       },
     });
 
@@ -61,6 +60,7 @@ export async function searchCustomersHandler(req, res, next) {
       users.map((user) => ({
         id: user.id,
         fullName: user.name,
+        email: user.email,
       }))
     );
   } catch (error) {
@@ -130,9 +130,7 @@ export async function saveCustomerDetailsHandler(req, res, next) {
 
     return res.status(201).json({
       ok: true,
-      message: welcomeEmailSent
-        ? 'Buyer details saved. Welcome email sent.'
-        : 'Buyer details saved.',
+      message: 'Buyer details saved. Thank you.',
       customer: {
         id: user.id,
         fullName: user.name,

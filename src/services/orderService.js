@@ -364,6 +364,212 @@ export async function createPendingOrder(payload) {
   };
 }
 
+export async function createAdminDiscountOrder(payload) {
+  const {
+    customerId,
+    salesItemId,
+    quantity,
+    fulfillmentMethod,
+    discountedUnitPrice,
+    paymentMethod = 'INTERAC_E_TRANSFER',
+    discountReason,
+    adminUserId,
+    adminComment,
+  } = payload;
+
+  const salesItem = await prisma.salesItem.findUnique({
+    where: { id: salesItemId },
+  });
+
+  if (!salesItem) {
+    throw new Error('Selected sales event could not be found.');
+  }
+
+  if (salesItem.status !== 'ACTIVE') {
+    throw new Error(`${salesItem.name} is no longer active.`);
+  }
+
+  if (new Date() >= salesItem.closingDate) {
+    throw new Error(`${salesItem.name} is already closed.`);
+  }
+
+  if (discountedUnitPrice <= 0) {
+    throw new Error('Discounted unit price must be greater than zero.');
+  }
+
+  if (discountedUnitPrice >= salesItem.pricePerUnit) {
+    throw new Error('Discounted unit price must be lower than the current sales price.');
+  }
+
+  const user = await prisma.user.findFirst({
+    where: {
+      id: customerId,
+      role: 'USER',
+      isActive: true,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!user) {
+    throw new Error('Selected buyer could not be found.');
+  }
+
+  const orderLine = {
+    salesItem,
+    salesItemId: salesItem.id,
+    quantity,
+    fulfillmentMethod,
+    unitPrice: discountedUnitPrice,
+    lineTotal: quantity * discountedUnitPrice,
+  };
+
+  const subtotal = orderLine.lineTotal;
+  const deliveryFee = calculateGroupedDeliveryFee([orderLine]);
+  const isManualFlow = !isCardPaymentMethod(paymentMethod);
+  const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
+  const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
+    subtotal,
+    deliveryFee,
+    paymentMethod,
+  });
+
+  const discountMetadata = {
+    discountOrder: true,
+    pricingMode: 'ADMIN_OVERRIDE',
+    originalUnitPrice: salesItem.pricePerUnit,
+    discountedUnitPrice,
+    discountAmountPerUnit: salesItem.pricePerUnit - discountedUnitPrice,
+    discountReason,
+    createdByAdminUserId: adminUserId,
+    createdAt: new Date().toISOString(),
+    adminComment: adminComment || null,
+  };
+
+  const cartSnapshot = {
+    meta: discountMetadata,
+    items: [
+      {
+        salesItemId: orderLine.salesItemId,
+        batchNumber: salesItem.batchNumber,
+        name: salesItem.name,
+        saleType: salesItem.saleType,
+        description: salesItem.description,
+        bundleItems: Array.isArray(salesItem.bundleItemsJson) ? salesItem.bundleItemsJson : [],
+        quantity: orderLine.quantity,
+        unitPrice: orderLine.unitPrice,
+        lineTotal: orderLine.lineTotal,
+        fulfillmentMethod: orderLine.fulfillmentMethod,
+        fulfillmentStatus: getInitialFulfillmentStatus(orderLine.fulfillmentMethod),
+        fulfillmentChildren: salesItem.saleType === 'BUNDLE_DISCOUNTED_SALE'
+          ? (Array.isArray(salesItem.bundleItemsJson) ? salesItem.bundleItemsJson : []).map((bundleItem) => ({
+              name: bundleItem.name,
+              quantity: (Number(bundleItem.quantity) || 0) * orderLine.quantity,
+              lineTotal: null,
+              fulfillmentMethod: orderLine.fulfillmentMethod,
+              fulfillmentStatus: getInitialFulfillmentStatus(orderLine.fulfillmentMethod),
+              parentBundleName: salesItem.name,
+            }))
+          : [],
+        location: salesItem.pickupInstructions,
+        deliveryConfig: {
+          enabled: salesItem.deliveryEnabled,
+          baseRangeMax: salesItem.deliveryBaseRangeMax,
+          basePrice: salesItem.deliveryBasePrice,
+          additionalUnitPrice: salesItem.deliveryAdditionalUnitPrice,
+        },
+      },
+    ],
+  };
+
+  const order = await prisma.$transaction(async (tx) => {
+    const orderSequence = await reserveNextOrderSequence(tx, salesItem.id);
+
+    return tx.order.create({
+      data: {
+        orderSequence,
+        userId: user.id,
+        salesItemId: salesItem.id,
+        quantity,
+        fulfillmentMethod,
+        fulfillmentStatus: getInitialFulfillmentStatus(fulfillmentMethod),
+        unitPrice: discountedUnitPrice,
+        paymentMethod,
+        currency: salesItem.currency,
+        subtotal,
+        serviceFee: deliveryFee,
+        totalAmount,
+        notes: JSON.stringify(cartSnapshot),
+        status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
+        paymentStatus: 'PENDING_PAYMENT',
+        payment: {
+          create: {
+            method: paymentMethod,
+            status: 'PENDING_PAYMENT',
+            providerPayloadJson: {
+              adminDiscount: discountMetadata,
+            },
+          },
+        },
+      },
+      include: {
+        user: true,
+        salesItem: true,
+        payment: true,
+      },
+    });
+  });
+
+  const displayOrderReference = formatDisplayOrderReference({
+    createdAt: order.createdAt,
+    batchNumber: salesItem.batchNumber,
+    orderSequence: order.orderSequence,
+  });
+
+  const resolvedManualInstructions = isManualFlow
+    ? getManualPaymentInstructions(paymentMethod, { orderReference: displayOrderReference })
+    : null;
+
+  return {
+    orderId: order.id,
+    orderReference: order.orderReference,
+    displayOrderReference,
+    orderSequence: order.orderSequence,
+    batchNumber: salesItem.batchNumber,
+    createdAt: order.createdAt,
+    totalAmount: order.totalAmount,
+    subtotal: order.subtotal,
+    deliveryFee: order.serviceFee,
+    stripeProcessingFee,
+    fulfillmentMethod: order.fulfillmentMethod,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus,
+    status: order.status,
+    cartItems: cartSnapshot.items,
+    salesItem: {
+      id: salesItem.id,
+      name: salesItem.name,
+      batchNumber: salesItem.batchNumber,
+      pickupInstructions: salesItem.pickupInstructions,
+    },
+    user: {
+      id: order.user.id,
+      name: order.user.name,
+      email: order.user.email,
+    },
+    discountMeta: discountMetadata,
+    paymentInstructions: resolvedManualInstructions,
+    manualPayment: isManualFlow
+      ? {
+          transferEmail: isInteracFlow ? env.interacBusinessEmail : null,
+          instructions: resolvedManualInstructions,
+          confirmationEtaHours: 6,
+        }
+      : null,
+  };
+}
+
 export async function setOrderPaymentMethodByReference({ orderReference, paymentMethod }) {
   const order = await prisma.order.findUnique({
     where: { orderReference },
