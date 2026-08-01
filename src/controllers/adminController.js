@@ -2117,6 +2117,7 @@ export async function createAdminIncompleteOrderUploadHandler(req, res, next) {
       where: { orderReference: payload.orderReference },
       select: {
         orderReference: true,
+        paymentMethod: true,
         paymentStatus: true,
         status: true,
       },
