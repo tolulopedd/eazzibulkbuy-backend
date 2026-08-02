@@ -140,6 +140,50 @@ export async function sendOrderFulfillmentCompletedEmail({
   });
 }
 
+export async function sendOrderReadyNoticeEmail({
+  email,
+  firstName,
+  displayOrderReference,
+  itemsSummary,
+  fulfillmentMethod,
+  address,
+  readyDate,
+  timeWindow,
+  contactName,
+  contactPhone,
+  note,
+}) {
+  const isDelivery = fulfillmentMethod === 'DELIVERY';
+
+  await sendMail({
+    to: email,
+    subject: isDelivery ? 'Your order is ready for delivery' : 'Your order is ready for pickup',
+    text: [
+      `Hello ${firstName},`,
+      '',
+      isDelivery
+        ? 'Your paid order is now ready for delivery coordination.'
+        : 'Your paid order is now ready for pickup.',
+      '',
+      `Order reference: ${displayOrderReference}`,
+      `Items: ${itemsSummary}`,
+      `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
+      `Date: ${readyDate}`,
+      `Time: ${timeWindow}`,
+      contactName ? `Contact name: ${contactName}` : null,
+      contactPhone ? `Contact phone: ${contactPhone}` : null,
+      note ? `Instructions: ${note}` : null,
+      '',
+      isDelivery
+        ? 'Please watch for further coordination from our team if needed.'
+        : 'Please arrive within the stated time window to receive your order.',
+      '',
+      'Regards,',
+      'EazziBulkBuy.',
+    ].filter(Boolean).join('\n'),
+  });
+}
+
 export async function sendOrderPaymentResolutionEmail({
   email,
   firstName,

@@ -12,7 +12,12 @@ import {
   createTransferProofUploadTarget,
   isValidReceiptObjectKey,
 } from '../services/storageService.js';
-import { sendOrderFulfillmentCompletedEmail, sendOrderPaymentResolutionEmail } from '../services/emailService.js';
+import {
+  sendOrderFulfillmentCompletedEmail,
+  sendOrderPaymentResolutionEmail,
+  sendOrderReadyNoticeEmail,
+} from '../services/emailService.js';
+import { sendWhatsAppTextMessage } from '../services/messagingService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 
@@ -82,6 +87,66 @@ function parseOrderNotes(notes) {
   } catch {
     return null;
   }
+}
+
+function formatPickupNoticeStatus(value) {
+  return value?.sentAt ? 'SENT' : 'NOT_SENT';
+}
+
+function buildFallbackSnapshotItem(order) {
+  return {
+    salesItemId: order.salesItem?.id || order.salesItemId,
+    name: order.salesItem?.name || 'Order items',
+    quantity: order.quantity,
+    lineTotal: order.subtotal || order.totalAmount,
+    fulfillmentMethod: order.fulfillmentMethod,
+    fulfillmentStatus: order.fulfillmentStatus,
+    batchNumber: order.salesItem?.batchNumber || '',
+    location: order.salesItem?.pickupInstructions || '',
+    saleType: order.salesItem?.saleType || 'NORMAL_SALE',
+    bundleItems: [],
+  };
+}
+
+function formatPickupNoticeItemSummary(items = []) {
+  return items
+    .map((item) => `${item.name} x${item.quantity}`)
+    .join(', ');
+}
+
+function buildPickupNoticeMessageText({
+  firstName,
+  displayOrderReference,
+  itemsSummary,
+  fulfillmentMethod,
+  address,
+  readyDate,
+  timeWindow,
+  contactName,
+  contactPhone,
+  note,
+}) {
+  const isDelivery = fulfillmentMethod === 'DELIVERY';
+
+  return [
+    `Hello ${firstName},`,
+    '',
+    isDelivery
+      ? 'Your paid order is now ready for delivery coordination.'
+      : 'Your paid order is now ready for pickup.',
+    '',
+    `Order reference: ${displayOrderReference}`,
+    `Items: ${itemsSummary}`,
+    `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
+    `Date: ${readyDate}`,
+    `Time: ${timeWindow}`,
+    contactName ? `Contact name: ${contactName}` : null,
+    contactPhone ? `Contact phone: ${contactPhone}` : null,
+    note ? `Instructions: ${note}` : null,
+    '',
+    'Regards,',
+    'EazziBulkBuy.',
+  ].filter(Boolean).join('\n');
 }
 
 function getOrderSnapshotItems(order) {
@@ -274,6 +339,7 @@ function normalizeFulfillmentItems(order) {
         fulfillmentStatusLabel: getFulfillmentStatusLabel(order.fulfillmentStatus),
         batchNumber: order.salesItem?.batchNumber || '',
         location: order.salesItem?.pickupInstructions || '',
+        pickupNotice: null,
       },
     ];
   }
@@ -307,6 +373,7 @@ function normalizeFulfillmentItems(order) {
           bundleItems: [],
           isBundleComponent: true,
           bundleName: bundleChild.parentBundleName || item.name,
+          pickupNotice: bundleChild.pickupNotice || null,
         });
       });
       return;
@@ -330,6 +397,7 @@ function normalizeFulfillmentItems(order) {
       bundleItems: Array.isArray(item.bundleItems) ? item.bundleItems : [],
       isBundleComponent: false,
       bundleName: null,
+      pickupNotice: item.pickupNotice || null,
     });
   });
 
@@ -684,6 +752,34 @@ const adminReportsQuerySchema = z.object({
   reportType: z
     .enum(['orderReady', 'supplierOrders', 'salesDetails'])
     .default('orderReady'),
+});
+
+const listPickupNoticesQuerySchema = z.object({
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  q: z.string().trim().max(120).optional(),
+  batchNumber: z.string().trim().max(120).optional(),
+  location: z.string().trim().max(255).optional(),
+  fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
+  noticeStatus: z.enum(['NOT_SENT', 'SENT']).optional(),
+  sortBy: z.enum(['paidAt', 'createdAt', 'batchNumber', 'location', 'buyer']).default('paidAt'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(20),
+});
+
+const sendPickupNoticesSchema = z.object({
+  items: z.array(z.object({
+    orderReference: z.string().uuid(),
+    itemIndex: z.number().int().min(0),
+  })).min(1).max(200),
+  channels: z.array(z.enum(['EMAIL', 'WHATSAPP'])).min(1),
+  address: z.string().trim().min(3).max(255),
+  readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  timeWindow: z.string().trim().min(3).max(120),
+  contactName: z.string().trim().max(120).optional(),
+  contactPhone: z.string().trim().max(40).optional(),
+  note: z.string().trim().max(500).optional(),
 });
 
 async function findConflictingActiveBatchNumber(batchNumber, excludeSalesItemId) {
@@ -1263,6 +1359,379 @@ async function buildAdminReportsData(query) {
       supplierOrderRows,
       salesDetailRows,
     };
+}
+
+function sortPickupNoticeRows(rows, query) {
+  const sortDirection = query.sortOrder === 'asc' ? 1 : -1;
+
+  return [...rows].sort((left, right) => {
+    if (query.sortBy === 'batchNumber') {
+      return sortDirection * String(left.batchNumber || '').localeCompare(String(right.batchNumber || ''));
+    }
+
+    if (query.sortBy === 'location') {
+      return sortDirection * String(left.location || '').localeCompare(String(right.location || ''));
+    }
+
+    if (query.sortBy === 'buyer') {
+      return sortDirection * String(left.user?.name || '').localeCompare(String(right.user?.name || ''));
+    }
+
+    const leftTime = new Date(query.sortBy === 'createdAt' ? left.createdAt : (left.paidAt || left.createdAt)).getTime();
+    const rightTime = new Date(query.sortBy === 'createdAt' ? right.createdAt : (right.paidAt || right.createdAt)).getTime();
+    return sortDirection * (leftTime - rightTime);
+  });
+}
+
+async function buildPickupNoticeRows(query) {
+  const orders = await prisma.order.findMany({
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          address: true,
+          city: true,
+          province: true,
+          postalCode: true,
+        },
+      },
+      salesItem: {
+        select: {
+          id: true,
+          name: true,
+          batchNumber: true,
+          pickupInstructions: true,
+          saleType: true,
+        },
+      },
+      payment: {
+        select: {
+          providerReference: true,
+          providerPayloadJson: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const reconciledOrders = await Promise.all(
+    orders.map(async (order) => {
+      const needsStripeSync =
+        order.paymentMethod === 'STRIPE_CARD' &&
+        !isOrderPaidLike(order) &&
+        Boolean(order.payment?.providerReference);
+
+      if (!needsStripeSync) {
+        return order;
+      }
+
+      try {
+        const paymentIntent = await retrieveStripePaymentIntent(order.payment.providerReference);
+        if (paymentIntent?.status !== 'succeeded') {
+          return order;
+        }
+
+        const updated = await markOrderPaidByReference({
+          orderReference: order.orderReference,
+          providerReference: paymentIntent.id,
+          payload: paymentIntent,
+        });
+
+        return {
+          ...order,
+          status: updated.status,
+          paymentStatus: updated.paymentStatus,
+          paidAt: updated.paidAt,
+        };
+      } catch {
+        return order;
+      }
+    }),
+  );
+
+  const filteredRows = reconciledOrders
+    .filter((order) => isOrderPaidLike(order))
+    .filter((order) => orderMatchesDateRange(order, { startDate: query.startDate, endDate: query.endDate }))
+    .flatMap((order) => normalizeFulfillmentItems(order).map((item) => ({
+      ...order,
+      ...item,
+      displayOrderReference: formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      }),
+      noticeStatus: formatPickupNoticeStatus(item.pickupNotice),
+      noticeSentAt: item.pickupNotice?.sentAt || null,
+      noticeChannels: item.pickupNotice?.lastResults || {},
+    })))
+    .filter((row) => row.fulfillmentStatus === 'PENDING_PICKUP' || row.fulfillmentStatus === 'PENDING_DELIVERY')
+    .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
+    .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
+    .filter((row) => !query.location || includesInsensitive(row.location, query.location))
+    .filter((row) => !query.batchNumber || parseBatchNumberFilters(query.batchNumber).some((batch) => includesInsensitive(row.batchNumber, batch)))
+    .filter((row) => {
+      if (!query.q) {
+        return true;
+      }
+
+      return [
+        row.orderReference,
+        row.displayOrderReference,
+        row.user?.name,
+        row.user?.email,
+        row.user?.phone,
+        row.batchNumber,
+        row.name,
+        row.location,
+      ].some((value) => includesInsensitive(value, query.q));
+    });
+
+  const rows = sortPickupNoticeRows(filteredRows, query);
+  const locations = [...new Set(rows.map((row) => row.location).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+  return {
+    rows,
+    filterOptions: {
+      locations,
+    },
+  };
+}
+
+export async function listPickupNoticesHandler(req, res, next) {
+  try {
+    const query = listPickupNoticesQuerySchema.parse(req.query);
+    const { rows, filterOptions } = await buildPickupNoticeRows(query);
+    const skip = (query.page - 1) * query.limit;
+    const pagedRows = rows.slice(skip, skip + query.limit);
+
+    return res.json({
+      items: pagedRows,
+      filterOptions,
+      page: query.page,
+      limit: query.limit,
+      total: rows.length,
+      totalPages: Math.max(1, Math.ceil(rows.length / query.limit)),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function sendPickupNoticesHandler(req, res, next) {
+  try {
+    const payload = sendPickupNoticesSchema.parse(req.body);
+    const orderReferences = [...new Set(payload.items.map((item) => item.orderReference))];
+    const orders = await prisma.order.findMany({
+      where: { orderReference: { in: orderReferences } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            firstName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+            saleType: true,
+          },
+        },
+      },
+    });
+
+    const results = [];
+
+    for (const orderReference of orderReferences) {
+      const order = orders.find((entry) => entry.orderReference === orderReference);
+      if (!order || !isOrderPaidLike(order)) {
+        continue;
+      }
+
+      const snapshot = parseOrderNotes(order.notes);
+      const rawItems = Array.isArray(snapshot?.items) && snapshot.items.length
+        ? snapshot.items
+        : [buildFallbackSnapshotItem(order)];
+      const flattenedItems = normalizeFulfillmentItems({
+        ...order,
+        notes: JSON.stringify({
+          ...(snapshot || {}),
+          items: rawItems,
+        }),
+      });
+
+      const selectedForOrder = payload.items.filter((item) => item.orderReference === orderReference);
+      const selectedIndices = new Set(selectedForOrder.map((item) => item.itemIndex));
+      const selectedRows = flattenedItems.filter((item) => selectedIndices.has(item.itemIndex));
+
+      if (!selectedRows.length) {
+        continue;
+      }
+
+      const itemsSummary = formatPickupNoticeItemSummary(selectedRows);
+      const firstName = order.user?.firstName || order.user?.name || 'Customer';
+      const displayOrderReference = formatDisplayOrderReference({
+        createdAt: order.createdAt,
+        batchNumber: order.salesItem?.batchNumber,
+        orderSequence: order.orderSequence,
+      });
+      const messageText = buildPickupNoticeMessageText({
+        firstName,
+        displayOrderReference,
+        itemsSummary,
+        fulfillmentMethod: order.fulfillmentMethod,
+        address: payload.address,
+        readyDate: payload.readyDate,
+        timeWindow: payload.timeWindow,
+        contactName: payload.contactName,
+        contactPhone: payload.contactPhone,
+        note: payload.note,
+      });
+
+      const nowIso = new Date().toISOString();
+      const channelResults = {};
+
+      if (payload.channels.includes('EMAIL')) {
+        if (order.user?.email) {
+          try {
+            await sendOrderReadyNoticeEmail({
+              email: order.user.email,
+              firstName,
+              displayOrderReference,
+              itemsSummary,
+              fulfillmentMethod: order.fulfillmentMethod,
+              address: payload.address,
+              readyDate: payload.readyDate,
+              timeWindow: payload.timeWindow,
+              contactName: payload.contactName,
+              contactPhone: payload.contactPhone,
+              note: payload.note,
+            });
+            channelResults.email = { status: 'sent', sentAt: nowIso };
+          } catch (error) {
+            channelResults.email = { status: 'failed', sentAt: nowIso, reason: error?.message || 'Email send failed.' };
+          }
+        } else {
+          channelResults.email = { status: 'skipped', sentAt: nowIso, reason: 'Buyer email is not available.' };
+        }
+      }
+
+      if (payload.channels.includes('WHATSAPP')) {
+        const whatsappResult = await sendWhatsAppTextMessage({
+          to: order.user?.phone || '',
+          text: messageText,
+        });
+
+        channelResults.whatsapp = {
+          status: whatsappResult.status,
+          sentAt: nowIso,
+          reason: whatsappResult.reason || null,
+        };
+      }
+
+      const sentSuccessfully = Object.values(channelResults).some((result) => result?.status === 'sent');
+      const nextItems = rawItems.map((item, sourceIndex) => {
+        const matchedRow = selectedRows.find((row) => row.sourceIndex === sourceIndex && row.bundleItemIndex === undefined);
+        const matchedBundleRows = selectedRows.filter((row) => row.sourceIndex === sourceIndex && row.bundleItemIndex !== undefined);
+
+        if (matchedBundleRows.length) {
+          const nextChildren = buildBundleFulfillmentChildren(order, item).map((child, childIndex) => {
+            const bundleMatch = matchedBundleRows.find((row) => row.bundleItemIndex === childIndex);
+            if (!bundleMatch) {
+              return child;
+            }
+
+            const previous = child.pickupNotice || {};
+            return {
+              ...child,
+              pickupNotice: {
+                ...previous,
+                address: payload.address,
+                readyDate: payload.readyDate,
+                timeWindow: payload.timeWindow,
+                contactName: payload.contactName || '',
+                contactPhone: payload.contactPhone || '',
+                note: payload.note || '',
+                sentAt: sentSuccessfully ? nowIso : previous.sentAt || null,
+                lastSentAt: nowIso,
+                sendCount: Number(previous.sendCount || 0) + 1,
+                lastResults: channelResults,
+                sentByUserId: req.admin.userId,
+              },
+            };
+          });
+
+          return {
+            ...item,
+            fulfillmentChildren: nextChildren,
+          };
+        }
+
+        if (!matchedRow) {
+          return item;
+        }
+
+        const previous = item.pickupNotice || {};
+        return {
+          ...item,
+          pickupNotice: {
+            ...previous,
+            address: payload.address,
+            readyDate: payload.readyDate,
+            timeWindow: payload.timeWindow,
+            contactName: payload.contactName || '',
+            contactPhone: payload.contactPhone || '',
+            note: payload.note || '',
+            sentAt: sentSuccessfully ? nowIso : previous.sentAt || null,
+            lastSentAt: nowIso,
+            sendCount: Number(previous.sendCount || 0) + 1,
+            lastResults: channelResults,
+            sentByUserId: req.admin.userId,
+          },
+        };
+      });
+
+      await prisma.order.update({
+        where: { orderReference },
+        data: {
+          notes: JSON.stringify({
+            ...(snapshot || {}),
+            items: nextItems,
+          }),
+        },
+      });
+
+      results.push({
+        orderReference,
+        displayOrderReference,
+        itemsSummary,
+        channelResults,
+        sentSuccessfully,
+      });
+    }
+
+    const sentCount = results.filter((entry) => entry.sentSuccessfully).length;
+
+    return res.json({
+      message: sentCount
+        ? `Pickup notice sent for ${sentCount} order${sentCount === 1 ? '' : 's'}.`
+        : 'No pickup notices were sent. Check channel availability or buyer contact details.',
+      results,
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function exportReportsHandler(req, res, next) {

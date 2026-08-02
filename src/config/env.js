@@ -46,6 +46,9 @@ export const env = {
   smtpUser: process.env.SMTP_USER || '',
   smtpPass: process.env.SMTP_PASS || '',
   smtpFrom: process.env.SMTP_FROM || 'EazziBulkBuy <no-reply@eazzibulkbuy.com>',
+  whatsappAccessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || '',
+  whatsappPhoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || '',
+  whatsappApiVersion: process.env.META_WHATSAPP_API_VERSION || 'v21.0',
   interacBusinessEmail: process.env.INTERAC_BUSINESS_EMAIL || 'payments@eazzibulkbuy.ca',
   interacTransferInstructions:
     process.env.INTERAC_TRANSFER_INSTRUCTIONS ||
@@ -91,6 +94,7 @@ export const isStripeConfigured = Boolean(env.stripeSecretKey);
 export const isHelcimConfigured = Boolean(env.helcimApiToken);
 export const isResendConfigured = Boolean(env.resendApiKey);
 export const isSmtpConfigured = Boolean(env.smtpHost && env.smtpUser && env.smtpPass);
+export const isWhatsAppConfigured = Boolean(env.whatsappAccessToken && env.whatsappPhoneNumberId);
 export const isS3Configured = Boolean(
   env.s3Region &&
   env.s3BucketName &&

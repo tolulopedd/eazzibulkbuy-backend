@@ -26,6 +26,8 @@ import {
   declineCustomerUpdateRequestHandler,
   exportCustomersHandler,
   listDiscountOrdersHandler,
+  listPickupNoticesHandler,
+  sendPickupNoticesHandler,
 } from '../controllers/adminController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
 
@@ -56,6 +58,8 @@ router.post('/customers/update-requests/:requestId/approve', requireAdminRoles('
 router.post('/customers/update-requests/:requestId/decline', requireAdminRoles('ADMIN', 'SUPERADMIN'), declineCustomerUpdateRequestHandler);
 router.get('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listDiscountOrdersHandler);
 router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), createDiscountOrderHandler);
+router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticesHandler);
+router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
