@@ -14,6 +14,11 @@ import {
   createTransferProofViewUrl,
   isValidReceiptObjectKey,
 } from './storageService.js';
+import {
+  DISCOUNT_ORDER_SYSTEM_BATCH_NUMBER,
+  DISCOUNT_ORDER_SYSTEM_LOCATION,
+  DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME,
+} from '../constants/systemSalesItems.js';
 
 function buildBuyerName({ title, firstName, lastName }) {
   return [title, firstName, lastName].filter(Boolean).join(' ').trim();
@@ -142,6 +147,30 @@ async function reserveNextOrderSequence(tx, salesItemId) {
   await tx.$queryRaw`SELECT "id" FROM "sales_items" WHERE "id" = ${salesItemId} FOR UPDATE`;
   const result = await tx.$queryRaw`SELECT COALESCE(MAX("order_sequence"), 0) AS "maxSequence" FROM "orders" WHERE "sales_item_id" = ${salesItemId}`;
   return Number(result?.[0]?.maxSequence || 0) + 1;
+}
+
+async function ensureDiscountOrderAnchorSalesItem(tx) {
+  const existing = await tx.salesItem.findFirst({
+    where: { name: DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return tx.salesItem.create({
+    data: {
+      name: DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME,
+      saleType: 'NORMAL_SALE',
+      batchNumber: DISCOUNT_ORDER_SYSTEM_BATCH_NUMBER,
+      description: 'System anchor for admin discount orders.',
+      pickupInstructions: DISCOUNT_ORDER_SYSTEM_LOCATION,
+      deliveryEnabled: false,
+      pricePerUnit: 1,
+      status: 'INACTIVE',
+      closingDate: new Date('2099-12-31T23:59:59.000Z'),
+    },
+  });
 }
 
 export async function createPendingOrder(payload) {
@@ -367,39 +396,13 @@ export async function createPendingOrder(payload) {
 export async function createAdminDiscountOrder(payload) {
   const {
     customerId,
-    salesItemId,
-    quantity,
+    items,
     fulfillmentMethod,
-    discountedUnitPrice,
     paymentMethod = 'INTERAC_E_TRANSFER',
     discountReason,
     adminUserId,
     adminComment,
   } = payload;
-
-  const salesItem = await prisma.salesItem.findUnique({
-    where: { id: salesItemId },
-  });
-
-  if (!salesItem) {
-    throw new Error('Selected sales event could not be found.');
-  }
-
-  if (salesItem.status !== 'ACTIVE') {
-    throw new Error(`${salesItem.name} is no longer active.`);
-  }
-
-  if (new Date() >= salesItem.closingDate) {
-    throw new Error(`${salesItem.name} is already closed.`);
-  }
-
-  if (discountedUnitPrice <= 0) {
-    throw new Error('Discounted unit price must be greater than zero.');
-  }
-
-  if (discountedUnitPrice >= salesItem.pricePerUnit) {
-    throw new Error('Discounted unit price must be lower than the current sales price.');
-  }
 
   const user = await prisma.user.findFirst({
     where: {
@@ -416,17 +419,85 @@ export async function createAdminDiscountOrder(payload) {
     throw new Error('Selected buyer could not be found.');
   }
 
-  const orderLine = {
-    salesItem,
-    salesItemId: salesItem.id,
-    quantity,
-    fulfillmentMethod,
-    unitPrice: discountedUnitPrice,
-    lineTotal: quantity * discountedUnitPrice,
-  };
+  const referencedSalesItemIds = [...new Set(items.map((item) => item.salesItemId).filter(Boolean))];
+  const salesItems = referencedSalesItemIds.length
+    ? await prisma.salesItem.findMany({
+        where: { id: { in: referencedSalesItemIds } },
+      })
+    : [];
+  const salesItemMap = new Map(salesItems.map((salesItem) => [salesItem.id, salesItem]));
 
-  const subtotal = orderLine.lineTotal;
-  const deliveryFee = calculateGroupedDeliveryFee([orderLine]);
+  if (salesItems.length !== referencedSalesItemIds.length) {
+    throw new Error('One or more selected sales event items could not be found.');
+  }
+
+  const orderLines = items.map((item) => {
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const discountedUnitPrice = Number(item.discountedUnitPrice) || 0;
+
+    if (discountedUnitPrice <= 0) {
+      throw new Error('Discounted unit price must be greater than zero.');
+    }
+
+    if (item.sourceType === 'SALES_EVENT') {
+      const salesItem = salesItemMap.get(item.salesItemId);
+      if (!salesItem) {
+        throw new Error('Selected sales event item could not be found.');
+      }
+      if (salesItem.status !== 'ACTIVE') {
+        throw new Error(`${salesItem.name} is no longer active.`);
+      }
+      if (new Date() >= salesItem.closingDate) {
+        throw new Error(`${salesItem.name} is already closed.`);
+      }
+      if (discountedUnitPrice >= salesItem.pricePerUnit) {
+        throw new Error(`Discounted unit price for ${salesItem.name} must be lower than the current sales price.`);
+      }
+
+      return {
+        sourceType: 'SALES_EVENT',
+        salesItem,
+        salesItemId: salesItem.id,
+        quantity,
+        fulfillmentMethod,
+        unitPrice: discountedUnitPrice,
+        lineTotal: quantity * discountedUnitPrice,
+        displayName: salesItem.name,
+        description: salesItem.description,
+        location: salesItem.pickupInstructions,
+        batchNumber: salesItem.batchNumber,
+        saleType: salesItem.saleType,
+        bundleItems: Array.isArray(salesItem.bundleItemsJson) ? salesItem.bundleItemsJson : [],
+      };
+    }
+
+    return {
+      sourceType: 'CUSTOM',
+      salesItem: {
+        name: item.customName?.trim() || 'Custom item',
+        saleType: 'NORMAL_SALE',
+        bundleItemsJson: [],
+        deliveryEnabled: false,
+        deliveryBaseRangeMax: 0,
+        deliveryBasePrice: 0,
+        deliveryAdditionalUnitPrice: 0,
+      },
+      salesItemId: null,
+      quantity,
+      fulfillmentMethod,
+      unitPrice: discountedUnitPrice,
+      lineTotal: quantity * discountedUnitPrice,
+      displayName: item.customName?.trim() || 'Custom item',
+      description: item.customDescription?.trim() || null,
+      location: item.customLocation?.trim() || DISCOUNT_ORDER_SYSTEM_LOCATION,
+      batchNumber: 'CUSTOM',
+      saleType: 'NORMAL_SALE',
+      bundleItems: [],
+    };
+  });
+
+  const subtotal = orderLines.reduce((sum, line) => sum + line.lineTotal, 0);
+  const deliveryFee = calculateGroupedDeliveryFee(orderLines);
   const isManualFlow = !isCardPaymentMethod(paymentMethod);
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
   const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
@@ -438,65 +509,73 @@ export async function createAdminDiscountOrder(payload) {
   const discountMetadata = {
     discountOrder: true,
     pricingMode: 'ADMIN_OVERRIDE',
-    originalUnitPrice: salesItem.pricePerUnit,
-    discountedUnitPrice,
-    discountAmountPerUnit: salesItem.pricePerUnit - discountedUnitPrice,
     discountReason,
     createdByAdminUserId: adminUserId,
     createdAt: new Date().toISOString(),
     adminComment: adminComment || null,
+    lines: orderLines.map((line) => ({
+      sourceType: line.sourceType,
+      salesItemId: line.salesItemId,
+      name: line.displayName,
+      batchNumber: line.batchNumber,
+      quantity: line.quantity,
+      originalUnitPrice: line.sourceType === 'SALES_EVENT' ? line.salesItem.pricePerUnit : null,
+      discountedUnitPrice: line.unitPrice,
+      discountAmountPerUnit: line.sourceType === 'SALES_EVENT' ? line.salesItem.pricePerUnit - line.unitPrice : null,
+      lineTotal: line.lineTotal,
+    })),
   };
 
   const cartSnapshot = {
     meta: discountMetadata,
-    items: [
-      {
-        salesItemId: orderLine.salesItemId,
-        batchNumber: salesItem.batchNumber,
-        name: salesItem.name,
-        saleType: salesItem.saleType,
-        description: salesItem.description,
-        bundleItems: Array.isArray(salesItem.bundleItemsJson) ? salesItem.bundleItemsJson : [],
-        quantity: orderLine.quantity,
-        unitPrice: orderLine.unitPrice,
-        lineTotal: orderLine.lineTotal,
-        fulfillmentMethod: orderLine.fulfillmentMethod,
-        fulfillmentStatus: getInitialFulfillmentStatus(orderLine.fulfillmentMethod),
-        fulfillmentChildren: salesItem.saleType === 'BUNDLE_DISCOUNTED_SALE'
-          ? (Array.isArray(salesItem.bundleItemsJson) ? salesItem.bundleItemsJson : []).map((bundleItem) => ({
-              name: bundleItem.name,
-              quantity: (Number(bundleItem.quantity) || 0) * orderLine.quantity,
-              lineTotal: null,
-              fulfillmentMethod: orderLine.fulfillmentMethod,
-              fulfillmentStatus: getInitialFulfillmentStatus(orderLine.fulfillmentMethod),
-              parentBundleName: salesItem.name,
-            }))
-          : [],
-        location: salesItem.pickupInstructions,
-        deliveryConfig: {
-          enabled: salesItem.deliveryEnabled,
-          baseRangeMax: salesItem.deliveryBaseRangeMax,
-          basePrice: salesItem.deliveryBasePrice,
-          additionalUnitPrice: salesItem.deliveryAdditionalUnitPrice,
-        },
+    items: orderLines.map((line) => ({
+      salesItemId: line.salesItemId,
+      batchNumber: line.batchNumber,
+      name: line.displayName,
+      saleType: line.saleType,
+      description: line.description,
+      bundleItems: line.bundleItems,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      lineTotal: line.lineTotal,
+      fulfillmentMethod: line.fulfillmentMethod,
+      fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+      fulfillmentChildren: line.saleType === 'BUNDLE_DISCOUNTED_SALE'
+        ? line.bundleItems.map((bundleItem) => ({
+            name: bundleItem.name,
+            quantity: (Number(bundleItem.quantity) || 0) * line.quantity,
+            lineTotal: null,
+            fulfillmentMethod: line.fulfillmentMethod,
+            fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+            parentBundleName: line.displayName,
+          }))
+        : [],
+      location: line.location,
+      deliveryConfig: {
+        enabled: Boolean(line.salesItem?.deliveryEnabled),
+        baseRangeMax: line.salesItem?.deliveryBaseRangeMax || 0,
+        basePrice: line.salesItem?.deliveryBasePrice || 0,
+        additionalUnitPrice: line.salesItem?.deliveryAdditionalUnitPrice || 0,
       },
-    ],
+    })),
   };
 
   const order = await prisma.$transaction(async (tx) => {
-    const orderSequence = await reserveNextOrderSequence(tx, salesItem.id);
+    const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
+      || await ensureDiscountOrderAnchorSalesItem(tx);
+    const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.id);
 
     return tx.order.create({
       data: {
         orderSequence,
         userId: user.id,
-        salesItemId: salesItem.id,
-        quantity,
+        salesItemId: anchorSalesItem.id,
+        quantity: orderLines.reduce((sum, line) => sum + line.quantity, 0),
         fulfillmentMethod,
         fulfillmentStatus: getInitialFulfillmentStatus(fulfillmentMethod),
-        unitPrice: discountedUnitPrice,
+        unitPrice: orderLines[0]?.unitPrice || 0,
         paymentMethod,
-        currency: salesItem.currency,
+        currency: anchorSalesItem.currency || 'CAD',
         subtotal,
         serviceFee: deliveryFee,
         totalAmount,
@@ -523,7 +602,7 @@ export async function createAdminDiscountOrder(payload) {
 
   const displayOrderReference = formatDisplayOrderReference({
     createdAt: order.createdAt,
-    batchNumber: salesItem.batchNumber,
+    batchNumber: order.salesItem.batchNumber,
     orderSequence: order.orderSequence,
   });
 
@@ -548,10 +627,10 @@ export async function createAdminDiscountOrder(payload) {
     status: order.status,
     cartItems: cartSnapshot.items,
     salesItem: {
-      id: salesItem.id,
-      name: salesItem.name,
-      batchNumber: salesItem.batchNumber,
-      pickupInstructions: salesItem.pickupInstructions,
+      id: order.salesItem.id,
+      name: order.salesItem.name,
+      batchNumber: order.salesItem.batchNumber,
+      pickupInstructions: order.salesItem.pickupInstructions,
     },
     user: {
       id: order.user.id,

@@ -19,6 +19,7 @@ import {
   deleteIncompleteOrderHandler,
   paymentProofViewUrlHandler,
   resendPaymentConfirmationHandler,
+  resolvePaymentHandler,
   updateCustomerHandler,
   createAdminCustomerHandler,
   approveCustomerUpdateRequestHandler,
@@ -63,6 +64,7 @@ router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles
 router.post('/payments/:orderReference/mark-pending-review', requireAdminRoles('ADMIN', 'SUPERADMIN'), markIncompleteOrderPendingReviewHandler);
 router.post('/payments/:orderReference/confirm-interac', requireAdminRoles('ADMIN', 'SUPERADMIN'), confirmInteracPaymentHandler);
 router.post('/payments/:orderReference/resend-confirmation', requireAdminRoles('ADMIN', 'SUPERADMIN'), resendPaymentConfirmationHandler);
+router.post('/payments/:orderReference/resolve', requireAdminRoles('ADMIN', 'SUPERADMIN'), resolvePaymentHandler);
 router.delete('/payments/:orderReference/incomplete-order', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteIncompleteOrderHandler);
 
 export default router;

@@ -140,6 +140,34 @@ export async function sendOrderFulfillmentCompletedEmail({
   });
 }
 
+export async function sendOrderPaymentResolutionEmail({
+  email,
+  firstName,
+  displayOrderReference,
+  action,
+  reason,
+}) {
+  const actionLabel = action === 'REFUNDED' ? 'refunded' : 'cancelled';
+
+  await sendMail({
+    to: email,
+    subject: `Order ${action === 'REFUNDED' ? 'Refund' : 'Cancellation'} Update`,
+    text: [
+      `Hello ${firstName},`,
+      '',
+      `Your order has been ${actionLabel}.`,
+      '',
+      `Order reference: ${displayOrderReference}`,
+      `Reason: ${reason}`,
+      '',
+      'If you need any clarification, please reply to this email and our team will assist you.',
+      '',
+      'Regards,',
+      'EazziBulkBuy.',
+    ].join('\n'),
+  });
+}
+
 export async function sendBuyerWelcomeEmail({ email, buyerName }) {
   await sendMail({
     to: email,

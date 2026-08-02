@@ -1,4 +1,5 @@
 import { prisma } from '../config/prisma.js';
+import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 
 export async function getSalesItemByIdHandler(req, res, next) {
   try {
@@ -20,6 +21,7 @@ export async function listActiveSalesItemsHandler(_req, res, next) {
     const now = new Date();
     const items = await prisma.salesItem.findMany({
       where: {
+        name: { not: DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME },
         status: 'ACTIVE',
         closingDate: { gt: now },
       },

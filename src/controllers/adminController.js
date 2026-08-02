@@ -12,8 +12,9 @@ import {
   createTransferProofUploadTarget,
   isValidReceiptObjectKey,
 } from '../services/storageService.js';
-import { sendOrderFulfillmentCompletedEmail } from '../services/emailService.js';
+import { sendOrderFulfillmentCompletedEmail, sendOrderPaymentResolutionEmail } from '../services/emailService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
+import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 
 function isOrderPaidLike(order) {
   return (
@@ -50,6 +51,25 @@ function getFulfillmentStatusLabel(status) {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
+}
+
+function getDisplayPaymentStatus(order) {
+  const resolutionAction = order?.payment?.providerPayloadJson?.adminResolution?.action;
+  if (resolutionAction === 'REFUNDED' || resolutionAction === 'CANCELLED') {
+    return resolutionAction;
+  }
+
+  if (order?.paymentMethod === 'STRIPE_CARD') {
+    return isOrderPaidLike(order) ? 'PAID' : 'PENDING_PAYMENT';
+  }
+
+  if (order?.paymentMethod === 'INTERAC_E_TRANSFER') {
+    if (isOrderPaidLike(order)) return 'PAID';
+    if (order?.paymentStatus === 'PENDING_REVIEW') return 'PENDING_REVIEW';
+    return 'PENDING_PAYMENT';
+  }
+
+  return order?.paymentStatus || 'UNKNOWN';
 }
 
 function parseOrderNotes(notes) {
@@ -316,6 +336,68 @@ function normalizeFulfillmentItems(order) {
   return flattenedItems;
 }
 
+function orderItemMatchesReportFilters(item, query) {
+  if (!item) {
+    return false;
+  }
+
+  if (query.salesItemId && item.salesItemId !== query.salesItemId) {
+    return false;
+  }
+
+  const batchFilters = parseBatchNumberFilters(query.batchNumber);
+  if (batchFilters.length && !batchFilters.some((batch) => includesInsensitive(item.batchNumber, batch))) {
+    return false;
+  }
+
+  if (query.fulfillmentMethod && item.fulfillmentMethod !== query.fulfillmentMethod) {
+    return false;
+  }
+
+  if (query.fulfillmentStatus && item.fulfillmentStatus !== query.fulfillmentStatus) {
+    return false;
+  }
+
+  return true;
+}
+
+function sumReportItemAmounts(items) {
+  const countedBundleSources = new Set();
+
+  return items.reduce((sum, item) => {
+    if (item.isBundleComponent) {
+      const bundleKey = `${item.salesItemId || 'bundle'}:${item.sourceIndex ?? item.itemIndex}`;
+      if (countedBundleSources.has(bundleKey)) {
+        return sum;
+      }
+
+      countedBundleSources.add(bundleKey);
+      return sum + (item.bundleLineTotal ?? 0);
+    }
+
+    return sum + (item.lineTotal || 0);
+  }, 0);
+}
+
+function getOrderBatchSummary(order) {
+  const batches = [...new Set(normalizeFulfillmentItems(order).map((item) => item.batchNumber).filter(Boolean))];
+  return batches.join(', ');
+}
+
+function getOrderItemSummary(order) {
+  const groupedItems = new Map();
+
+  normalizeFulfillmentItems(order).forEach((item) => {
+    const itemName = item?.name || 'Order items';
+    const quantity = Number(item?.quantity) || 0;
+    groupedItems.set(itemName, (groupedItems.get(itemName) || 0) + quantity);
+  });
+
+  return [...groupedItems.entries()]
+    .map(([name, quantity]) => `${name} x${quantity}`)
+    .join(' + ');
+}
+
 function deriveAggregateFulfillmentStatus(order, fulfillmentItems) {
   const methods = [...new Set(fulfillmentItems.map((item) => item.fulfillmentMethod || order.fulfillmentMethod))];
   const isDelivery = methods.every((method) => method === 'DELIVERY');
@@ -487,15 +569,48 @@ const reviewCustomerUpdateRequestSchema = z.object({
   requestId: z.string().uuid(),
 });
 
+const discountOrderItemSchema = z.object({
+  sourceType: z.enum(['SALES_EVENT', 'CUSTOM']),
+  salesItemId: z.string().uuid().optional(),
+  customName: z.string().trim().max(120).optional(),
+  customDescription: z.string().trim().max(500).optional(),
+  customLocation: z.string().trim().max(255).optional(),
+  quantity: z.number().int().min(1).max(500),
+  discountedUnitPrice: z.number().int().positive(),
+}).superRefine((item, ctx) => {
+  if (item.sourceType === 'SALES_EVENT' && !item.salesItemId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['salesItemId'],
+      message: 'Select a sales event item.',
+    });
+  }
+
+  if (item.sourceType === 'CUSTOM' && (!item.customName || item.customName.trim().length < 2)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['customName'],
+      message: 'Enter the item name.',
+    });
+  }
+});
+
 const createDiscountOrderSchema = z.object({
   customerId: z.string().uuid(),
-  salesItemId: z.string().uuid(),
-  quantity: z.number().int().min(1).max(500),
+  items: z.array(discountOrderItemSchema).min(1).max(25),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).default('PICKUP'),
-  discountedUnitPrice: z.number().int().positive(),
   paymentMethod: z.enum(['INTERAC_E_TRANSFER']).default('INTERAC_E_TRANSFER'),
   discountReason: z.string().trim().min(3).max(240),
   adminComment: z.string().trim().max(500).optional(),
+}).superRefine((payload, ctx) => {
+  const hasCustomItems = payload.items.some((item) => item.sourceType === 'CUSTOM');
+  if (payload.fulfillmentMethod === 'DELIVERY' && hasCustomItems) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['fulfillmentMethod'],
+      message: 'Custom discount items currently support pickup only.',
+    });
+  }
 });
 
 const listDiscountOrdersQuerySchema = z.object({
@@ -526,6 +641,13 @@ const adminIncompleteOrderReviewSchema = z.object({
   }),
 });
 
+const adminPaymentResolutionSchema = z.object({
+  orderReference: z.string().uuid(),
+  action: z.enum(['CANCELLED', 'REFUNDED']),
+  comment: z.string().trim().min(3).max(500),
+  notifyBuyer: z.boolean().default(false),
+});
+
 const listOrdersQuerySchema = z.object({
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
@@ -539,7 +661,7 @@ const listOrdersQuerySchema = z.object({
     .enum(['PENDING_PAYMENT', 'AWAITING_MANUAL_PAYMENT', 'PAID', 'CONFIRMED', 'CANCELLED'])
     .optional(),
   paymentStatus: z
-    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED'])
+    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED'])
     .optional(),
   paymentMethod: z
     .enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY'])
@@ -624,6 +746,7 @@ export async function listSalesItemsHandler(req, res, next) {
     const query = listSalesItemsQuerySchema.parse(req.query);
 
     const where = {
+      name: { not: DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME },
       ...(query.status ? { status: query.status } : {}),
       ...(query.batchNumber ? { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } : {}),
       ...(query.q
@@ -800,19 +923,7 @@ export async function adminReportsHandler(req, res, next) {
 }
 
 async function buildAdminReportsData(query) {
-    const where = {
-      ...((query.startDate || query.endDate)
-        ? {
-            createdAt: {
-              ...(query.startDate ? { gte: new Date(query.startDate) } : {}),
-              ...(query.endDate ? { lte: new Date(query.endDate) } : {}),
-            },
-          }
-        : {}),
-    };
-
     const orders = await prisma.order.findMany({
-      where,
       include: {
         salesItem: true,
         user: {
@@ -958,6 +1069,9 @@ async function buildAdminReportsData(query) {
       const fulfillmentItems = normalizeFulfillmentItems(order);
       const aggregateFulfillmentStatus = deriveAggregateFulfillmentStatus(order, fulfillmentItems);
       const itemDetails = fulfillmentItems.map((item) => ({
+        salesItemId: item.salesItemId || order.salesItemId,
+        sourceIndex: item.sourceIndex ?? null,
+        bundleItemIndex: item.bundleItemIndex ?? null,
         name: item.name,
         quantity: item.quantity,
         lineTotal: item.lineTotal || 0,
@@ -981,14 +1095,14 @@ async function buildAdminReportsData(query) {
         }),
         aggregateFulfillmentStatus,
         itemDetails,
+        reportItemDetails: itemDetails.filter((item) => orderItemMatchesReportFilters(item, query)),
       };
     }).filter((order) =>
-      orderMatchesSalesItemId(order, query.salesItemId) &&
-      orderMatchesBatchNumber(order, query.batchNumber) &&
-      orderMatchesFulfillmentFilters(order, {
-        fulfillmentMethod: query.fulfillmentMethod,
-        fulfillmentStatus: query.fulfillmentStatus,
-      }),
+      orderMatchesDateRange(order, {
+        startDate: query.startDate,
+        endDate: query.endDate,
+      }) &&
+      order.reportItemDetails.length > 0,
     );
 
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
@@ -999,14 +1113,14 @@ async function buildAdminReportsData(query) {
       orderReference: order.orderReference,
       displayOrderReference: order.displayOrderReference,
       batchNumber: order.salesItem?.batchNumber || '',
-      items: order.itemDetails.map((item) => item.name).join(', '),
-      quantities: order.itemDetails.map((item) => `${item.name}: ${item.quantity}`).join(', '),
+      items: order.reportItemDetails.map((item) => item.name).join(', '),
+      quantities: order.reportItemDetails.map((item) => `${item.name}: ${item.quantity}`).join(', '),
     }));
 
     const supplierAggregation = new Map();
     for (const order of paidOrders) {
       const bundleComponentTotals = new Map();
-      for (const item of order.itemDetails) {
+      for (const item of order.reportItemDetails) {
         if (!item.isBundleComponent) {
           continue;
         }
@@ -1015,7 +1129,7 @@ async function buildAdminReportsData(query) {
         bundleComponentTotals.set(groupKey, (bundleComponentTotals.get(groupKey) || 0) + item.quantity);
       }
 
-      for (const item of order.itemDetails) {
+      for (const item of order.reportItemDetails) {
         if (item.isBundleComponent) {
           const supplierKey = [item.batchNumber, item.saleType, item.name].join('::');
           const current = supplierAggregation.get(supplierKey) || {
@@ -1074,10 +1188,10 @@ async function buildAdminReportsData(query) {
     const salesDetailRows = paidOrders.map((order) => {
       const orderDetails = [
         order.user?.name || 'Unknown buyer',
-        order.itemDetails.map((item) => `${item.name} x${item.quantity}`).join(', '),
+        order.reportItemDetails.map((item) => `${item.name} x${item.quantity}`).join(', '),
       ].filter(Boolean).join(' · ');
 
-      const fulfillment = order.itemDetails
+      const fulfillment = order.reportItemDetails
         .map((item) => `${item.name}: ${item.fulfillmentStatusLabel}`)
         .join(', ');
 
@@ -1088,7 +1202,7 @@ async function buildAdminReportsData(query) {
         batchNumber: order.salesItem?.batchNumber || '',
         orderDetails,
         fulfillment,
-        totalAmount: order.totalAmount,
+        totalAmount: sumReportItemAmounts(order.reportItemDetails),
       };
     });
 
@@ -1215,6 +1329,130 @@ export async function resendPaymentConfirmationHandler(req, res, next) {
       paymentMethod: outcome.paymentMethod,
       paymentStatus: outcome.paymentStatus,
       paidAt: outcome.paidAt,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function resolvePaymentHandler(req, res, next) {
+  try {
+    const payload = adminPaymentResolutionSchema.parse({
+      ...req.body,
+      orderReference: req.params.orderReference,
+    });
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference: payload.orderReference },
+      include: {
+        user: true,
+        salesItem: true,
+        payment: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    const isPendingReview = order.paymentStatus === 'PENDING_REVIEW';
+    const isPaid = isOrderPaidLike(order);
+    if (!isPendingReview && !isPaid) {
+      return res.status(409).json({ message: 'Only pending review or paid orders can be cancelled or refunded.' });
+    }
+
+    const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
+      ? order.payment.providerPayloadJson
+      : {};
+    const resolvedAt = new Date().toISOString();
+    const adminResolution = {
+      action: payload.action,
+      comment: payload.comment,
+      notifyBuyer: payload.notifyBuyer,
+      resolvedAt,
+      resolvedByUserId: req.admin.userId,
+      previousPaymentStatus: order.paymentStatus,
+      previousOrderStatus: order.status,
+    };
+
+    const updatedOrder = await prisma.order.update({
+      where: { orderReference: payload.orderReference },
+      data: {
+        status: 'CANCELLED',
+        paymentStatus: 'FAILED',
+        payment: {
+          update: {
+            status: 'FAILED',
+            providerPayloadJson: {
+              ...existingPayload,
+              adminResolution,
+            },
+          },
+        },
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            providerReference: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    let emailSent = false;
+    if (payload.notifyBuyer && updatedOrder.user?.email) {
+      try {
+        await sendOrderPaymentResolutionEmail({
+          email: updatedOrder.user.email,
+          firstName: updatedOrder.user.firstName || updatedOrder.user.name?.split(' ').filter(Boolean)[0] || 'Customer',
+          displayOrderReference: formatDisplayOrderReference({
+            createdAt: updatedOrder.createdAt,
+            batchNumber: updatedOrder.salesItem?.batchNumber,
+            orderSequence: updatedOrder.orderSequence,
+          }),
+          action: payload.action,
+          reason: payload.comment,
+        });
+        emailSent = true;
+      } catch (error) {
+        console.error('Failed to send payment resolution email', {
+          orderReference: updatedOrder.orderReference,
+          action: payload.action,
+          error: error?.message,
+        });
+      }
+    }
+
+    return res.json({
+      message: `${payload.action === 'REFUNDED' ? 'Refund' : 'Cancellation'} saved successfully.`,
+      emailSent,
+      order: updatedOrder,
     });
   } catch (error) {
     next(error);
@@ -1612,7 +1850,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
     const orders = await prisma.order.findMany({
       where: {
         notes: { contains: '"discountOrder":true' },
-        ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
+        ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
       },
       orderBy: { createdAt: query.sortOrder },
       include: {
@@ -1665,6 +1903,8 @@ export async function listDiscountOrdersHandler(req, res, next) {
           orderSequence: order.orderSequence,
         }),
         discountMeta.discountReason,
+        ...getOrderSnapshotItems(order).map((item) => item?.name),
+        ...getOrderSnapshotItems(order).map((item) => item?.batchNumber),
       ];
 
       return haystack.some((value) => includesInsensitive(value, query.q));
@@ -1680,6 +1920,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
         orderSequence: order.orderSequence,
       }),
       discountMeta: getDiscountOrderMeta(order),
+      cartItems: getOrderSnapshotItems(order),
     }));
 
     return res.json({
@@ -1782,7 +2023,7 @@ export async function listOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -1891,6 +2132,7 @@ export async function listOrdersHandler(req, res, next) {
         endDate: query.endDate,
       }) &&
       (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
+      (query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -1924,7 +2166,7 @@ export async function exportOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -1954,9 +2196,11 @@ export async function exportOrdersHandler(req, res, next) {
 
     const normalizedOrders = orders.map((order) => {
       const fulfillmentItems = normalizeFulfillmentItems(order);
+      const aggregateFulfillmentStatus = deriveAggregateFulfillmentStatus(order, fulfillmentItems);
       return {
         ...order,
         fulfillmentItems,
+        fulfillmentStatus: aggregateFulfillmentStatus,
       };
     });
 
@@ -1966,6 +2210,7 @@ export async function exportOrdersHandler(req, res, next) {
         endDate: query.endDate,
       }) &&
       (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
+      (query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -1978,7 +2223,7 @@ export async function exportOrdersHandler(req, res, next) {
       [
         'Order Reference',
         'Batch Number',
-        'Sales Item',
+        'Items',
         'Buyer Name',
         'Buyer Email',
         'Buyer Phone',
@@ -2003,8 +2248,8 @@ export async function exportOrdersHandler(req, res, next) {
           batchNumber: order.salesItem?.batchNumber,
           orderSequence: order.orderSequence,
         }),
-        order.salesItem?.batchNumber || '',
-        order.salesItem?.name || '',
+        getOrderBatchSummary(order),
+        getOrderItemSummary(order),
         order.user?.name || '',
         order.user?.email || '',
         order.user?.phone || '',
@@ -2014,7 +2259,7 @@ export async function exportOrdersHandler(req, res, next) {
         order.user?.postalCode || '',
         order.quantity,
         order.paymentMethod,
-        order.paymentStatus,
+        getDisplayPaymentStatus(order),
         order.status,
         order.fulfillmentMethod,
         order.fulfillmentStatus,
