@@ -23,7 +23,20 @@ import { sendWhatsAppTextMessage } from '../services/messagingService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 
+function getAdminResolutionAction(order) {
+  return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
+}
+
+function isOrderResolvedAwayFromPaid(order) {
+  const action = getAdminResolutionAction(order);
+  return action === 'CANCELLED' || action === 'REFUNDED';
+}
+
 function isOrderPaidLike(order) {
+  if (isOrderResolvedAwayFromPaid(order)) {
+    return false;
+  }
+
   return (
     order.paymentStatus === 'PAID' ||
     order.paymentStatus === 'SUCCEEDED' ||
@@ -1058,6 +1071,7 @@ async function buildAdminReportsData(query) {
         payment: {
           select: {
             providerReference: true,
+            providerPayloadJson: true,
           },
         },
       },
@@ -1068,6 +1082,7 @@ async function buildAdminReportsData(query) {
       orders.map(async (order) => {
         const needsStripeSync =
           order.paymentMethod === 'STRIPE_CARD' &&
+          !isOrderResolvedAwayFromPaid(order) &&
           !isOrderPaidLike(order) &&
           Boolean(order.payment?.providerReference);
 
@@ -1125,6 +1140,11 @@ async function buildAdminReportsData(query) {
           totalAmount: true,
           status: true,
           paymentStatus: true,
+          payment: {
+            select: {
+              providerPayloadJson: true,
+            },
+          },
         },
       }),
       prisma.salesItem.findMany({
@@ -1171,7 +1191,7 @@ async function buildAdminReportsData(query) {
     const totalOrdersMtd = overviewOrders.filter((order) => isSameOrAfter(order.createdAt, monthStart)).length;
     const paidOrdersYtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt || order.createdAt, yearStart)).length;
     const paidOrdersMtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt || order.createdAt, monthStart)).length;
-    const pendingPaymentOrders = overviewOrders.filter((order) => !isOrderPaidLike(order)).length;
+    const pendingPaymentOrders = overviewOrders.filter((order) => !isOrderPaidLike(order) && !isOrderResolvedAwayFromPaid(order)).length;
     const totalSalesYtd = paidOverviewOrders
       .filter((order) => isSameOrAfter(order.paidAt || order.createdAt, yearStart))
       .reduce((sum, order) => sum + order.totalAmount, 0);
@@ -1446,6 +1466,7 @@ async function buildPickupNoticeRows(query) {
     orders.map(async (order) => {
       const needsStripeSync =
         order.paymentMethod === 'STRIPE_CARD' &&
+        !isOrderResolvedAwayFromPaid(order) &&
         !isOrderPaidLike(order) &&
         Boolean(order.payment?.providerReference);
 
@@ -2583,6 +2604,7 @@ export async function listOrdersHandler(req, res, next) {
       orders.map(async (order) => {
         const needsStripeSync =
           order.paymentMethod === 'STRIPE_CARD' &&
+          !isOrderResolvedAwayFromPaid(order) &&
           !isOrderPaidLike(order) &&
           Boolean(order.payment?.providerReference);
 
