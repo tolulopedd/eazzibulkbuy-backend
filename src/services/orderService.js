@@ -402,6 +402,7 @@ export async function createAdminDiscountOrder(payload) {
     discountReason,
     adminUserId,
     adminComment,
+    transferProof,
   } = payload;
 
   const user = await prisma.user.findFirst({
@@ -581,13 +582,23 @@ export async function createAdminDiscountOrder(payload) {
         totalAmount,
         notes: JSON.stringify(cartSnapshot),
         status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
-        paymentStatus: 'PENDING_PAYMENT',
+        paymentStatus: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
         payment: {
           create: {
             method: paymentMethod,
-            status: 'PENDING_PAYMENT',
+            status: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
             providerPayloadJson: {
               adminDiscount: discountMetadata,
+              ...(transferProof ? { transferProof: buildStoredTransferProof(transferProof) } : {}),
+              ...(isManualFlow
+                ? {
+                    adminRecovery: {
+                      comment: discountReason,
+                      updatedByUserId: adminUserId,
+                      updatedAt: new Date().toISOString(),
+                    },
+                  }
+                : {}),
             },
           },
         },
@@ -615,7 +626,7 @@ export async function createAdminDiscountOrder(payload) {
     orderReference: order.orderReference,
     displayOrderReference,
     orderSequence: order.orderSequence,
-    batchNumber: salesItem.batchNumber,
+    batchNumber: order.salesItem.batchNumber,
     createdAt: order.createdAt,
     totalAmount: order.totalAmount,
     subtotal: order.subtotal,

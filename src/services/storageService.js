@@ -34,12 +34,12 @@ function normalizePrefix(prefix) {
   return String(prefix || '').replace(/^\/+|\/+$/g, '');
 }
 
-function buildObjectKey({ orderReference, fileName, contentType }) {
+function buildObjectKey({ scopeKey, fileName, contentType }) {
   const prefix = normalizePrefix(env.s3ReceiptsPrefix);
   const extension = inferExtensionFromMime(contentType);
   const baseName = sanitizeFileName(fileName).replace(/\.[a-zA-Z0-9]+$/, '') || 'receipt';
 
-  return [prefix, orderReference, `${Date.now()}-${baseName}.${extension}`]
+  return [prefix, scopeKey, `${Date.now()}-${baseName}.${extension}`]
     .filter(Boolean)
     .join('/');
 }
@@ -56,15 +56,21 @@ export function isValidReceiptObjectKey(orderReference, objectKey) {
   return String(objectKey || '').startsWith(expectedStart);
 }
 
-export async function createTransferProofUploadTarget({
-  orderReference,
+export function isValidScopedReceiptObjectKey(scopeKey, objectKey) {
+  const prefix = normalizePrefix(env.s3ReceiptsPrefix);
+  const expectedStart = [prefix, scopeKey].filter(Boolean).join('/');
+  return String(objectKey || '').startsWith(expectedStart);
+}
+
+export async function createScopedTransferProofUploadTarget({
+  scopeKey,
   fileName,
   contentType,
 }) {
   assertS3Configured();
 
   const objectKey = buildObjectKey({
-    orderReference,
+    scopeKey,
     fileName,
     contentType,
   });
@@ -85,6 +91,18 @@ export async function createTransferProofUploadTarget({
     contentType,
     expiresInSeconds: DEFAULT_PRESIGNED_EXPIRY_SECONDS,
   };
+}
+
+export async function createTransferProofUploadTarget({
+  orderReference,
+  fileName,
+  contentType,
+}) {
+  return createScopedTransferProofUploadTarget({
+    scopeKey: orderReference,
+    fileName,
+    contentType,
+  });
 }
 
 export async function createTransferProofViewUrl(objectKey) {

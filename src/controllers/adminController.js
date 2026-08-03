@@ -9,8 +9,10 @@ import {
 } from '../services/orderService.js';
 import {
   buildStoredTransferProof,
+  createScopedTransferProofUploadTarget,
   createTransferProofUploadTarget,
   isValidReceiptObjectKey,
+  isValidScopedReceiptObjectKey,
 } from '../services/storageService.js';
 import {
   sendOrderFulfillmentCompletedEmail,
@@ -670,6 +672,12 @@ const createDiscountOrderSchema = z.object({
   paymentMethod: z.enum(['INTERAC_E_TRANSFER']).default('INTERAC_E_TRANSFER'),
   discountReason: z.string().trim().min(3).max(240),
   adminComment: z.string().trim().max(500).optional(),
+  transferProof: z.object({
+    fileName: z.string().trim().min(3).max(180),
+    contentType: z.string().trim().regex(/^image\/[a-zA-Z0-9.+-]+$/),
+    sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
+    objectKey: z.string().trim().min(10).max(300),
+  }),
 }).superRefine((payload, ctx) => {
   const hasCustomItems = payload.items.some((item) => item.sourceType === 'CUSTOM');
   if (payload.fulfillmentMethod === 'DELIVERY' && hasCustomItems) {
@@ -679,6 +687,20 @@ const createDiscountOrderSchema = z.object({
       message: 'Custom discount items currently support pickup only.',
     });
   }
+
+  if (payload.paymentMethod === 'INTERAC_E_TRANSFER' && !payload.transferProof) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['transferProof'],
+      message: 'Upload the Interac receipt before creating this discount order.',
+    });
+  }
+});
+
+const adminDiscountOrderUploadSchema = z.object({
+  fileName: z.string().trim().min(3).max(180),
+  contentType: z.string().trim().regex(/^image\/[a-zA-Z0-9.+-]+$/),
+  sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
 });
 
 const listDiscountOrdersQuerySchema = z.object({
@@ -2407,14 +2429,38 @@ export async function listDiscountOrdersHandler(req, res, next) {
 export async function createDiscountOrderHandler(req, res, next) {
   try {
     const payload = createDiscountOrderSchema.parse(req.body);
+    if (payload.transferProof && !isValidScopedReceiptObjectKey('discount-orders', payload.transferProof.objectKey)) {
+      return res.status(409).json({ message: 'Uploaded receipt does not match the discount order upload path.' });
+    }
+
     const order = await createAdminDiscountOrder({
       ...payload,
       adminUserId: req.admin.userId,
     });
 
     return res.status(201).json({
-      message: 'Discount order created successfully.',
+      message: 'Discount order created and sent to pending review.',
       order,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createAdminDiscountOrderUploadHandler(req, res, next) {
+  try {
+    const payload = adminDiscountOrderUploadSchema.parse(req.body);
+    const uploadTarget = await createScopedTransferProofUploadTarget({
+      scopeKey: 'discount-orders',
+      fileName: payload.fileName,
+      contentType: payload.contentType,
+    });
+
+    return res.json({
+      ...uploadTarget,
+      fileName: payload.fileName,
+      contentType: payload.contentType,
+      sizeBytes: payload.sizeBytes,
     });
   } catch (error) {
     next(error);

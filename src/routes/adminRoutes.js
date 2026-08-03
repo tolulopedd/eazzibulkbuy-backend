@@ -4,6 +4,7 @@ import { requireTrustedOrigin } from '../middleware/security.js';
 import {
   createSalesItemHandler,
   createDiscountOrderHandler,
+  createAdminDiscountOrderUploadHandler,
   adminReportsHandler,
   exportReportsHandler,
   listSalesItemsHandler,
@@ -57,6 +58,7 @@ router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'),
 router.post('/customers/update-requests/:requestId/approve', requireAdminRoles('ADMIN', 'SUPERADMIN'), approveCustomerUpdateRequestHandler);
 router.post('/customers/update-requests/:requestId/decline', requireAdminRoles('ADMIN', 'SUPERADMIN'), declineCustomerUpdateRequestHandler);
 router.get('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listDiscountOrdersHandler);
+router.post('/discount-orders/upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminDiscountOrderUploadHandler);
 router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), createDiscountOrderHandler);
 router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticesHandler);
 router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
