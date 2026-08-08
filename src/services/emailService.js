@@ -184,30 +184,57 @@ export async function sendOrderReadyNoticeEmail({
   });
 }
 
-export async function sendOrderPaymentResolutionEmail({
+export async function sendOrderRefundEmail({
   email,
   firstName,
   displayOrderReference,
-  action,
+  itemsSummary,
+  quantity,
+  totalRefunded,
   reason,
 }) {
-  const actionLabel = action === 'REFUNDED' ? 'refunded' : 'cancelled';
-
   await sendMail({
     to: email,
-    subject: `Order ${action === 'REFUNDED' ? 'Refund' : 'Cancellation'} Update`,
+    subject: 'Order Refund Update',
     text: [
       `Hello ${firstName},`,
       '',
-      `Your order has been ${actionLabel}.`,
+      'Your refund has been processed with below details:',
       '',
       `Order reference: ${displayOrderReference}`,
+      `Items: ${itemsSummary}`,
+      `Quantity: ${quantity}`,
+      `Total refunded: CAD ${(Number(totalRefunded || 0) / 100).toFixed(2)}`,
+      '',
       `Reason: ${reason}`,
       '',
-      'If you need any clarification, please reply to this email and our team will assist you.',
+      'Thank you for your patronage.',
       '',
       'Regards,',
       'EazziBulkBuy.',
+    ].join('\n'),
+  });
+}
+
+export async function sendOrderCancellationEmail({
+  email,
+  firstName,
+  reason,
+}) {
+  await sendMail({
+    to: email,
+    subject: 'Order Cancellation Update',
+    text: [
+      `Hello ${firstName},`,
+      '',
+      'Your order has been cancelled',
+      '',
+      `Reason: ${reason}`,
+      '',
+      'Thank you for your continued patronage.',
+      '',
+      'Regards',
+      'EazziBulkBuy',
     ].join('\n'),
   });
 }

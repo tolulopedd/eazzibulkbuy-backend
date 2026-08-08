@@ -16,7 +16,8 @@ import {
 } from '../services/storageService.js';
 import {
   sendOrderFulfillmentCompletedEmail,
-  sendOrderPaymentResolutionEmail,
+  sendOrderCancellationEmail,
+  sendOrderRefundEmail,
   sendOrderReadyNoticeEmail,
 } from '../services/emailService.js';
 import { sendWhatsAppTextMessage } from '../services/messagingService.js';
@@ -79,6 +80,22 @@ function getDisplayPaymentStatus(order) {
     return resolutionAction;
   }
 
+  const resolvedItems = getResolvedOrderSnapshotItems(order);
+  if (resolvedItems.length) {
+    const hasRefunded = resolvedItems.some((item) => item.paymentResolution?.action === 'REFUNDED');
+    const hasCancelled = resolvedItems.some((item) => item.paymentResolution?.action === 'CANCELLED');
+
+    if (hasRefunded && hasCancelled) {
+      return 'PARTIALLY_RESOLVED';
+    }
+    if (hasRefunded) {
+      return 'PARTIALLY_REFUNDED';
+    }
+    if (hasCancelled) {
+      return 'PARTIALLY_CANCELLED';
+    }
+  }
+
   if (order?.paymentMethod === 'STRIPE_CARD') {
     return isOrderPaidLike(order) ? 'PAID' : 'PENDING_PAYMENT';
   }
@@ -90,6 +107,11 @@ function getDisplayPaymentStatus(order) {
   }
 
   return order?.paymentStatus || 'UNKNOWN';
+}
+
+function isResolvedSnapshotItem(item) {
+  const action = item?.paymentResolution?.action;
+  return action === 'CANCELLED' || action === 'REFUNDED';
 }
 
 function parseOrderNotes(notes) {
@@ -169,13 +191,53 @@ function getOrderSnapshotItems(order) {
   return Array.isArray(snapshot?.items) ? snapshot.items : [];
 }
 
+function getActiveOrderSnapshotItems(order) {
+  return getOrderSnapshotItems(order).filter((item) => !isResolvedSnapshotItem(item));
+}
+
+function getResolvedOrderSnapshotItems(order, action = '') {
+  return getOrderSnapshotItems(order).filter((item) => {
+    if (!isResolvedSnapshotItem(item)) {
+      return false;
+    }
+
+    if (!action) {
+      return true;
+    }
+
+    return item.paymentResolution?.action === action;
+  });
+}
+
+function summarizeSnapshotItems(items = []) {
+  const groupedItems = new Map();
+
+  items.forEach((item) => {
+    const name = item?.name || 'Order items';
+    const quantity = Number(item?.quantity) || 0;
+    groupedItems.set(name, (groupedItems.get(name) || 0) + quantity);
+  });
+
+  return [...groupedItems.entries()]
+    .map(([name, quantity]) => `${name} x${quantity}`)
+    .join(' + ');
+}
+
+function sumSnapshotItemQuantity(items = []) {
+  return items.reduce((sum, item) => sum + (Number(item?.quantity) || 0), 0);
+}
+
+function sumSnapshotItemLineTotals(items = []) {
+  return items.reduce((sum, item) => sum + (Number(item?.lineTotal) || 0), 0);
+}
+
 function getDiscountOrderMeta(order) {
   const snapshot = parseOrderNotes(order.notes);
   return snapshot?.meta?.discountOrder ? snapshot.meta : null;
 }
 
 function getOrderSalesItemIds(order) {
-  const snapshotItems = getOrderSnapshotItems(order);
+  const snapshotItems = getActiveOrderSnapshotItems(order);
   const ids = snapshotItems
     .map((item) => item?.salesItemId)
     .filter(Boolean);
@@ -188,7 +250,7 @@ function getOrderSalesItemIds(order) {
 }
 
 function getOrderBatchNumbers(order) {
-  const snapshotItems = getOrderSnapshotItems(order);
+  const snapshotItems = getActiveOrderSnapshotItems(order);
   const batchNumbers = snapshotItems
     .map((item) => item?.batchNumber)
     .filter(Boolean);
@@ -338,8 +400,7 @@ function buildBundleFulfillmentChildren(order, item) {
 }
 
 function normalizeFulfillmentItems(order) {
-  const snapshot = parseOrderNotes(order.notes);
-  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const items = getActiveOrderSnapshotItems(order);
 
   if (!items.length) {
     return [
@@ -479,6 +540,22 @@ function getOrderItemSummary(order) {
   return [...groupedItems.entries()]
     .map(([name, quantity]) => `${name} x${quantity}`)
     .join(' + ');
+}
+
+function getOrderPaymentSummary(order) {
+  const activeSummary = summarizeSnapshotItems(getActiveOrderSnapshotItems(order));
+  const resolvedItems = getResolvedOrderSnapshotItems(order);
+
+  if (!resolvedItems.length) {
+    return activeSummary;
+  }
+
+  const resolvedSummary = summarizeSnapshotItems(resolvedItems);
+  const resolvedLabel = getDisplayPaymentStatus(order)
+    .replace(/^PARTIALLY_/, 'Partially ')
+    .toLowerCase();
+
+  return `${activeSummary} | ${resolvedLabel}: ${resolvedSummary}`;
 }
 
 function deriveAggregateFulfillmentStatus(order, fulfillmentItems) {
@@ -749,6 +826,7 @@ const adminPaymentResolutionSchema = z.object({
   action: z.enum(['CANCELLED', 'REFUNDED']),
   comment: z.string().trim().min(3).max(500),
   notifyBuyer: z.boolean().default(false),
+  sourceIndexes: z.array(z.number().int().min(0)).min(1).max(50),
 });
 
 const listOrdersQuerySchema = z.object({
@@ -764,7 +842,7 @@ const listOrdersQuerySchema = z.object({
     .enum(['PENDING_PAYMENT', 'AWAITING_MANUAL_PAYMENT', 'PAID', 'CONFIRMED', 'CANCELLED'])
     .optional(),
   paymentStatus: z
-    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED'])
+    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'])
     .optional(),
   paymentMethod: z
     .enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY'])
@@ -1873,11 +1951,34 @@ export async function resolvePaymentHandler(req, res, next) {
       return res.status(409).json({ message: 'Only pending review or paid orders can be cancelled or refunded.' });
     }
 
+    const snapshot = parseOrderNotes(order.notes);
+    const snapshotItems = Array.isArray(snapshot?.items) && snapshot.items.length
+      ? snapshot.items
+      : [buildFallbackSnapshotItem(order)];
+    const activeSnapshotItems = snapshotItems
+      .map((item, sourceIndex) => ({ ...item, sourceIndex }))
+      .filter((item) => !isResolvedSnapshotItem(item));
+
+    if (!activeSnapshotItems.length) {
+      return res.status(409).json({ message: 'There are no active items left on this order to cancel or refund.' });
+    }
+
+    const selectedIndexes = [...new Set(payload.sourceIndexes)];
+    const selectedItems = activeSnapshotItems.filter((item) => selectedIndexes.includes(item.sourceIndex));
+
+    if (!selectedItems.length) {
+      return res.status(409).json({ message: 'Select at least one active item to cancel or refund.' });
+    }
+
+    if (selectedItems.length !== selectedIndexes.length) {
+      return res.status(409).json({ message: 'One or more selected items are no longer available for this action.' });
+    }
+
     const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
       ? order.payment.providerPayloadJson
       : {};
     const resolvedAt = new Date().toISOString();
-    const adminResolution = {
+    const resolutionRecord = {
       action: payload.action,
       comment: payload.comment,
       notifyBuyer: payload.notifyBuyer,
@@ -1885,20 +1986,62 @@ export async function resolvePaymentHandler(req, res, next) {
       resolvedByUserId: req.admin.userId,
       previousPaymentStatus: order.paymentStatus,
       previousOrderStatus: order.status,
+      sourceIndexes: selectedIndexes,
+      partial: selectedItems.length < activeSnapshotItems.length,
+      itemsSummary: summarizeSnapshotItems(selectedItems),
+      quantity: sumSnapshotItemQuantity(selectedItems),
+      totalAmount: sumSnapshotItemLineTotals(selectedItems),
     };
+
+    const nextSnapshotItems = snapshotItems.map((item, sourceIndex) => (
+      selectedIndexes.includes(sourceIndex)
+        ? {
+            ...item,
+            paymentResolution: {
+              action: payload.action,
+              comment: payload.comment,
+              resolvedAt,
+              resolvedByUserId: req.admin.userId,
+            },
+          }
+        : item
+    ));
+    const remainingSnapshotItems = nextSnapshotItems.filter((item) => !isResolvedSnapshotItem(item));
+    const remainingQuantity = sumSnapshotItemQuantity(remainingSnapshotItems);
+    const remainingSubtotal = sumSnapshotItemLineTotals(remainingSnapshotItems);
+    const nextServiceFee = remainingSnapshotItems.length ? (order.serviceFee || 0) : 0;
+    const nextTotalAmount = remainingSnapshotItems.length ? remainingSubtotal + nextServiceFee : 0;
+    const resolutionHistory = Array.isArray(existingPayload.adminResolutionHistory)
+      ? existingPayload.adminResolutionHistory
+      : [];
+    const nextProviderPayload = {
+      ...existingPayload,
+      adminResolutionHistory: [...resolutionHistory, resolutionRecord],
+    };
+
+    if (remainingSnapshotItems.length === 0) {
+      nextProviderPayload.adminResolution = resolutionRecord;
+    } else if (nextProviderPayload.adminResolution) {
+      delete nextProviderPayload.adminResolution;
+    }
 
     const updatedOrder = await prisma.order.update({
       where: { orderReference: payload.orderReference },
       data: {
-        status: 'CANCELLED',
-        paymentStatus: 'FAILED',
+        quantity: remainingQuantity,
+        subtotal: remainingSubtotal,
+        serviceFee: nextServiceFee,
+        totalAmount: nextTotalAmount,
+        notes: JSON.stringify({
+          ...(snapshot && typeof snapshot === 'object' ? snapshot : {}),
+          items: nextSnapshotItems,
+        }),
+        status: remainingSnapshotItems.length === 0 ? 'CANCELLED' : order.status,
+        paymentStatus: remainingSnapshotItems.length === 0 ? 'FAILED' : order.paymentStatus,
         payment: {
           update: {
-            status: 'FAILED',
-            providerPayloadJson: {
-              ...existingPayload,
-              adminResolution,
-            },
+            status: remainingSnapshotItems.length === 0 ? 'FAILED' : order.payment?.status || order.paymentStatus,
+            providerPayloadJson: nextProviderPayload,
           },
         },
       },
@@ -1940,17 +2083,28 @@ export async function resolvePaymentHandler(req, res, next) {
     let emailSent = false;
     if (payload.notifyBuyer && updatedOrder.user?.email) {
       try {
-        await sendOrderPaymentResolutionEmail({
-          email: updatedOrder.user.email,
-          firstName: updatedOrder.user.firstName || updatedOrder.user.name?.split(' ').filter(Boolean)[0] || 'Customer',
-          displayOrderReference: formatDisplayOrderReference({
-            createdAt: updatedOrder.createdAt,
-            batchNumber: updatedOrder.salesItem?.batchNumber,
-            orderSequence: updatedOrder.orderSequence,
-          }),
-          action: payload.action,
-          reason: payload.comment,
-        });
+        const firstName = updatedOrder.user.firstName || updatedOrder.user.name?.split(' ').filter(Boolean)[0] || 'Customer';
+        if (payload.action === 'REFUNDED') {
+          await sendOrderRefundEmail({
+            email: updatedOrder.user.email,
+            firstName,
+            displayOrderReference: formatDisplayOrderReference({
+              createdAt: updatedOrder.createdAt,
+              batchNumber: updatedOrder.salesItem?.batchNumber,
+              orderSequence: updatedOrder.orderSequence,
+            }),
+            itemsSummary: summarizeSnapshotItems(selectedItems),
+            quantity: sumSnapshotItemQuantity(selectedItems),
+            totalRefunded: sumSnapshotItemLineTotals(selectedItems),
+            reason: payload.comment,
+          });
+        } else {
+          await sendOrderCancellationEmail({
+            email: updatedOrder.user.email,
+            firstName,
+            reason: payload.comment,
+          });
+        }
         emailSent = true;
       } catch (error) {
         console.error('Failed to send payment resolution email', {
@@ -1964,6 +2118,15 @@ export async function resolvePaymentHandler(req, res, next) {
     return res.json({
       message: `${payload.action === 'REFUNDED' ? 'Refund' : 'Cancellation'} saved successfully.`,
       emailSent,
+      resolvedItems: selectedItems,
+      resolvedQuantity: sumSnapshotItemQuantity(selectedItems),
+      resolvedAmount: sumSnapshotItemLineTotals(selectedItems),
+      orderTotals: {
+        quantity: remainingQuantity,
+        subtotal: remainingSubtotal,
+        serviceFee: nextServiceFee,
+        totalAmount: nextTotalAmount,
+      },
       order: updatedOrder,
     });
   } catch (error) {
@@ -2362,7 +2525,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
     const orders = await prisma.order.findMany({
       where: {
         notes: { contains: '"discountOrder":true' },
-        ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+        ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
       },
       orderBy: { createdAt: query.sortOrder },
       include: {
@@ -2559,7 +2722,7 @@ export async function listOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -2703,7 +2866,7 @@ export async function exportOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
