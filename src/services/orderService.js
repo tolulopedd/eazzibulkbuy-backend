@@ -7,7 +7,7 @@ import { getManualPaymentInstructions } from './paymentService.js';
 import { retrieveStripePaymentIntent } from './paymentService.js';
 import { validateHelcimPayResponse } from './paymentService.js';
 import { sendOrderPaidEmail } from './emailService.js';
-import { formatDisplayOrderReference } from '../utils/orderReference.js';
+import { formatDisplayOrderReference, getDisplayOrderReference } from '../utils/orderReference.js';
 import {
   buildStoredTransferProof,
   createTransferProofUploadTarget,
@@ -328,9 +328,17 @@ export async function createPendingOrder(payload) {
     }
 
     const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.id);
+    const orderCreatedAt = new Date();
+    const displayOrderReference = formatDisplayOrderReference({
+      createdAt: orderCreatedAt,
+      batchNumber: primaryLine.salesItem.batchNumber,
+      orderSequence,
+    });
 
     return tx.order.create({
       data: {
+        createdAt: orderCreatedAt,
+        displayOrderReference,
         orderSequence,
         userId: user.id,
         salesItemId: primaryLine.salesItem.id,
@@ -356,10 +364,8 @@ export async function createPendingOrder(payload) {
     });
   });
 
-  const displayOrderReference = formatDisplayOrderReference({
-    createdAt: order.createdAt,
+  const displayOrderReference = getDisplayOrderReference(order, {
     batchNumber: primaryLine.salesItem.batchNumber,
-    orderSequence: order.orderSequence,
   });
 
   const resolvedManualInstructions = isManualFlow
@@ -565,9 +571,17 @@ export async function createAdminDiscountOrder(payload) {
     const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
       || await ensureDiscountOrderAnchorSalesItem(tx);
     const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.id);
+    const orderCreatedAt = new Date();
+    const displayOrderReference = formatDisplayOrderReference({
+      createdAt: orderCreatedAt,
+      batchNumber: anchorSalesItem.batchNumber,
+      orderSequence,
+    });
 
     return tx.order.create({
       data: {
+        createdAt: orderCreatedAt,
+        displayOrderReference,
         orderSequence,
         userId: user.id,
         salesItemId: anchorSalesItem.id,
@@ -611,11 +625,7 @@ export async function createAdminDiscountOrder(payload) {
     });
   });
 
-  const displayOrderReference = formatDisplayOrderReference({
-    createdAt: order.createdAt,
-    batchNumber: order.salesItem.batchNumber,
-    orderSequence: order.orderSequence,
-  });
+  const displayOrderReference = getDisplayOrderReference(order);
 
   const resolvedManualInstructions = isManualFlow
     ? getManualPaymentInstructions(paymentMethod, { orderReference: displayOrderReference })
@@ -678,11 +688,7 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
   const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
   const manualInstructions = isManualFlow
     ? getManualPaymentInstructions(paymentMethod, {
-        orderReference: formatDisplayOrderReference({
-          createdAt: order.createdAt,
-          batchNumber: order.salesItem?.batchNumber,
-          orderSequence: order.orderSequence,
-        }),
+        orderReference: getDisplayOrderReference(order),
       })
     : null;
   const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
@@ -711,10 +717,8 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
   return {
     orderId: updated.id,
     orderReference: updated.orderReference,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: updated.createdAt,
+    displayOrderReference: getDisplayOrderReference(updated, {
       batchNumber: order.salesItem?.batchNumber,
-      orderSequence: updated.orderSequence,
     }),
     orderSequence: updated.orderSequence,
     batchNumber: order.salesItem?.batchNumber || '',
@@ -774,11 +778,7 @@ export async function createOrderPaymentIntent(orderReference) {
   return {
     orderId: order.id,
     orderReference: order.orderReference,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(order),
     clientSecret: paymentIntent.client_secret,
   };
 }
@@ -808,11 +808,7 @@ export async function createOrderHelcimCheckoutSession(orderReference) {
   const checkoutSession = await createHelcimCheckoutSession({
     amount: order.totalAmount,
     currency: order.currency,
-    orderReference: formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    orderReference: getDisplayOrderReference(order),
   });
 
   const existingPayload = order.payment?.providerPayloadJson && typeof order.payment.providerPayloadJson === 'object'
@@ -837,11 +833,7 @@ export async function createOrderHelcimCheckoutSession(orderReference) {
   return {
     orderId: order.id,
     orderReference: order.orderReference,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(order),
     checkoutToken: checkoutSession.checkoutToken,
   };
 }
@@ -912,11 +904,7 @@ export async function confirmManualTransferByReference({ orderReference, transfe
       alreadyConfirmed: true,
       message: 'Payment already confirmed.',
       orderReference: order.orderReference,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
     };
   }
 
@@ -926,11 +914,7 @@ export async function confirmManualTransferByReference({ orderReference, transfe
       alreadyConfirmed: true,
       message: 'Transfer already submitted for review. We will confirm within 6 hours.',
       orderReference: order.orderReference,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       emailSent: false,
     };
   }
@@ -970,11 +954,7 @@ export async function confirmManualTransferByReference({ orderReference, transfe
     ok: true,
     message: 'Transfer submitted successfully. We will confirm your transfer within 6 hours.',
     orderReference: order.orderReference,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(order),
     createdAt: order.createdAt,
     emailSent: false,
   };
@@ -1023,11 +1003,7 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
     return {
       orderReference: order.orderReference,
       createdAt: order.createdAt,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       alreadyConfirmed: true,
       emailSent: false,
     };
@@ -1048,11 +1024,7 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
     return {
       orderReference: confirmedOrder.orderReference,
       createdAt: confirmedOrder.createdAt,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: confirmedOrder.createdAt,
-        batchNumber: confirmedOrder.salesItem?.batchNumber,
-        orderSequence: confirmedOrder.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(confirmedOrder),
       paidAt: confirmedOrder.paidAt,
       emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
     };
@@ -1076,11 +1048,7 @@ export async function confirmCardPaymentByReference({ orderReference, paymentInt
   return {
     orderReference: confirmedOrder.orderReference,
     createdAt: confirmedOrder.createdAt,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: confirmedOrder.createdAt,
-      batchNumber: confirmedOrder.salesItem?.batchNumber,
-      orderSequence: confirmedOrder.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(confirmedOrder),
     paidAt: confirmedOrder.paidAt,
     emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
   };
@@ -1104,11 +1072,7 @@ export async function confirmHelcimPaymentByReference({ orderReference, checkout
     return {
       orderReference: order.orderReference,
       createdAt: order.createdAt,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       alreadyConfirmed: true,
       emailSent: false,
     };
@@ -1173,11 +1137,7 @@ export async function confirmHelcimPaymentByReference({ orderReference, checkout
   return {
     orderReference: confirmedOrder.orderReference,
     createdAt: confirmedOrder.createdAt,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: confirmedOrder.createdAt,
-      batchNumber: confirmedOrder.salesItem?.batchNumber,
-      orderSequence: confirmedOrder.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(confirmedOrder),
     paidAt: confirmedOrder.paidAt,
     emailSent: Boolean(confirmedOrder.paymentConfirmationEmailSent),
   };
@@ -1234,11 +1194,7 @@ export async function markOrderPaidByReference({ orderReference, providerReferen
         salesItemName: salesItemSummary,
         quantity: outcome.order.quantity,
         totalPaidCad: outcome.order.totalAmount,
-        displayOrderReference: formatDisplayOrderReference({
-          createdAt: outcome.order.createdAt,
-          batchNumber: outcome.order.salesItem?.batchNumber,
-          orderSequence: outcome.order.orderSequence,
-        }),
+        displayOrderReference: getDisplayOrderReference(outcome.order),
       });
       paymentConfirmationEmailSent = true;
     } catch (error) {
@@ -1276,11 +1232,7 @@ export async function resendOrderPaymentConfirmationByReference({ orderReference
     salesItemName: getSalesItemSummaryFromOrder(order),
     quantity: order.quantity,
     totalPaidCad: order.totalAmount,
-    displayOrderReference: formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    displayOrderReference: getDisplayOrderReference(order),
   });
 
   return {

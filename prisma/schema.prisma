@@ -135,6 +135,7 @@ model SalesItem {
 model Order {
   id             String        @id @default(uuid())
   orderReference String        @unique @default(uuid()) @map("order_reference")
+  displayOrderReference String? @unique @map("display_order_reference")
   orderSequence  Int           @default(1) @map("order_sequence")
   userId         String        @map("user_id")
   user           User          @relation(fields: [userId], references: [id])

@@ -18,3 +18,16 @@ export function formatDisplayOrderReference({ createdAt, batchNumber, orderSeque
 
   return `${day}${month}-${safeBatchNumber}-${safeSequence}`;
 }
+
+export function getDisplayOrderReference(order = {}, overrides = {}) {
+  const persisted = overrides.displayOrderReference ?? order?.displayOrderReference;
+  if (String(persisted || '').trim()) {
+    return String(persisted).trim();
+  }
+
+  return formatDisplayOrderReference({
+    createdAt: overrides.createdAt ?? order?.createdAt,
+    batchNumber: overrides.batchNumber ?? order?.batchNumber ?? order?.salesItem?.batchNumber,
+    orderSequence: overrides.orderSequence ?? order?.orderSequence,
+  });
+}

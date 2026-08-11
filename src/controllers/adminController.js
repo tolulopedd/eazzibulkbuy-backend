@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '../config/prisma.js';
-import { formatDisplayOrderReference } from '../utils/orderReference.js';
+import { getDisplayOrderReference } from '../utils/orderReference.js';
 import {
   createAdminDiscountOrder,
   getManualTransferProofViewUrlByReference,
@@ -299,11 +299,7 @@ function orderMatchesTextQuery(order, query) {
   const fulfillmentItems = normalizeFulfillmentItems(order);
   const haystack = [
     order.orderReference,
-    formatDisplayOrderReference({
-      createdAt: order.createdAt,
-      batchNumber: order.salesItem?.batchNumber,
-      orderSequence: order.orderSequence,
-    }),
+    getDisplayOrderReference(order),
     order.user?.name,
     order.user?.email,
     order.user?.phone,
@@ -1304,11 +1300,7 @@ async function buildAdminReportsData(query) {
 
       return {
         ...order,
-        displayOrderReference: formatDisplayOrderReference({
-          createdAt: order.createdAt,
-          batchNumber: order.salesItem?.batchNumber,
-          orderSequence: order.orderSequence,
-        }),
+        displayOrderReference: getDisplayOrderReference(order),
         aggregateFulfillmentStatus,
         itemDetails,
         reportItemDetails: itemDetails.filter((item) => orderItemMatchesReportFilters(item, query)),
@@ -1582,11 +1574,7 @@ async function buildPickupNoticeRows(query) {
     .flatMap((order) => normalizeFulfillmentItems(order).map((item) => ({
       ...order,
       ...item,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       noticeStatus: formatPickupNoticeStatus(item.pickupNotice),
       noticeSentAt: item.pickupNotice?.sentAt || null,
       noticeChannels: item.pickupNotice?.lastResults || {},
@@ -1702,11 +1690,7 @@ export async function sendPickupNoticesHandler(req, res, next) {
 
       const itemsSummary = formatPickupNoticeItemSummary(selectedRows);
       const firstName = order.user?.firstName || order.user?.name || 'Customer';
-      const displayOrderReference = formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      });
+      const displayOrderReference = getDisplayOrderReference(order);
       const messageText = buildPickupNoticeMessageText({
         firstName,
         displayOrderReference,
@@ -2088,11 +2072,7 @@ export async function resolvePaymentHandler(req, res, next) {
           await sendOrderRefundEmail({
             email: updatedOrder.user.email,
             firstName,
-            displayOrderReference: formatDisplayOrderReference({
-              createdAt: updatedOrder.createdAt,
-              batchNumber: updatedOrder.salesItem?.batchNumber,
-              orderSequence: updatedOrder.orderSequence,
-            }),
+            displayOrderReference: getDisplayOrderReference(updatedOrder),
             itemsSummary: summarizeSnapshotItems(selectedItems),
             quantity: sumSnapshotItemQuantity(selectedItems),
             totalRefunded: sumSnapshotItemLineTotals(selectedItems),
@@ -2572,11 +2552,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
         order.salesItem?.name,
         order.salesItem?.batchNumber,
         order.orderReference,
-        formatDisplayOrderReference({
-          createdAt: order.createdAt,
-          batchNumber: order.salesItem?.batchNumber,
-          orderSequence: order.orderSequence,
-        }),
+        getDisplayOrderReference(order),
         discountMeta.discountReason,
         ...getOrderSnapshotItems(order).map((item) => item?.name),
         ...getOrderSnapshotItems(order).map((item) => item?.batchNumber),
@@ -2589,11 +2565,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
     const skip = (query.page - 1) * query.limit;
     const pagedOrders = filteredOrders.slice(skip, skip + query.limit).map((order) => ({
       ...order,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       discountMeta: getDiscountOrderMeta(order),
       cartItems: getOrderSnapshotItems(order),
     }));
@@ -2789,10 +2761,8 @@ export async function listOrdersHandler(req, res, next) {
 
           return {
             ...updated,
-            displayOrderReference: formatDisplayOrderReference({
-              createdAt: updated.createdAt,
+            displayOrderReference: getDisplayOrderReference(updated, {
               batchNumber: order.salesItem?.batchNumber,
-              orderSequence: updated.orderSequence,
             }),
             user: order.user,
             salesItem: order.salesItem,
@@ -2819,11 +2789,7 @@ export async function listOrdersHandler(req, res, next) {
       return {
         ...order,
         fulfillmentStatus: aggregateFulfillmentStatus,
-        displayOrderReference: order.displayOrderReference || formatDisplayOrderReference({
-          createdAt: order.createdAt,
-          batchNumber: order.salesItem?.batchNumber,
-          orderSequence: order.orderSequence,
-        }),
+        displayOrderReference: getDisplayOrderReference(order),
         fulfillmentItems,
       };
     }).filter((order) =>
@@ -2943,11 +2909,7 @@ export async function exportOrdersHandler(req, res, next) {
         'Location of Sales',
       ].map(escapeCsv).join(','),
       ...filteredOrders.map((order) => [
-        formatDisplayOrderReference({
-          createdAt: order.createdAt,
-          batchNumber: order.salesItem?.batchNumber,
-          orderSequence: order.orderSequence,
-        }),
+        getDisplayOrderReference(order),
         getOrderBatchSummary(order),
         getOrderItemSummary(order),
         order.user?.name || '',
@@ -3163,11 +3125,7 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
         await sendOrderFulfillmentCompletedEmail({
           email: updatedOrder.user.email,
           firstName: updatedOrder.user.firstName || updatedOrder.user.name || 'Customer',
-          displayOrderReference: formatDisplayOrderReference({
-            createdAt: updatedOrder.createdAt,
-            batchNumber: updatedOrder.salesItem?.batchNumber,
-            orderSequence: updatedOrder.orderSequence,
-          }),
+          displayOrderReference: getDisplayOrderReference(updatedOrder),
           itemName: completedItem.name,
           quantity: completedItem.quantity,
           fulfillmentMethod: completedItem.fulfillmentMethod,
@@ -3365,11 +3323,7 @@ export async function markIncompleteOrderPendingReviewHandler(req, res, next) {
     return res.json({
       message: 'Incomplete order moved to pending review successfully.',
       orderReference: order.orderReference,
-      displayOrderReference: formatDisplayOrderReference({
-        createdAt: order.createdAt,
-        batchNumber: order.salesItem?.batchNumber,
-        orderSequence: order.orderSequence,
-      }),
+      displayOrderReference: getDisplayOrderReference(order),
       status: 'AWAITING_MANUAL_PAYMENT',
       paymentStatus: 'PENDING_REVIEW',
     });
