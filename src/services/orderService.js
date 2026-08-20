@@ -171,7 +171,7 @@ function isDisplayOrderReferenceUniqueConstraintError(error) {
 async function reserveNextOrderSequence(tx, batchNumber) {
   const orderCreatedAt = new Date();
   const prefix = buildDisplayOrderReferencePrefix(orderCreatedAt, batchNumber);
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`;
   const result = await tx.$queryRaw`
     SELECT COALESCE(MAX(CAST(RIGHT("display_order_reference", 4) AS INTEGER)), 0) AS "maxSequence"
     FROM "orders"
