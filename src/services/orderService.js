@@ -144,26 +144,34 @@ function isCardPaymentMethod(paymentMethod) {
   return paymentMethod === 'STRIPE_CARD' || paymentMethod === 'HELCIM_CARD';
 }
 
+function normalizeBatchNumber(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
 function isDisplayOrderReferenceUniqueConstraintError(error) {
   return (
     error?.code === 'P2002' &&
-    Array.isArray(error?.meta?.target) &&
-    error.meta.target.includes('display_order_reference')
+    (
+      (Array.isArray(error?.meta?.target) && error.meta.target.includes('display_order_reference'))
+      || String(error?.meta?.target || '').includes('display_order_reference')
+      || String(error?.message || '').includes('display_order_reference')
+    )
   );
 }
 
 async function reserveNextOrderSequence(tx, batchNumber) {
+  const normalizedBatchNumber = normalizeBatchNumber(batchNumber);
   await tx.$queryRaw`
     SELECT "id"
     FROM "sales_items"
-    WHERE "batch_number" = ${batchNumber}
+    WHERE UPPER(BTRIM("batch_number")) = ${normalizedBatchNumber}
     FOR UPDATE
   `;
   const result = await tx.$queryRaw`
     SELECT COALESCE(MAX(o."order_sequence"), 0) AS "maxSequence"
     FROM "orders" o
     INNER JOIN "sales_items" s ON s."id" = o."sales_item_id"
-    WHERE s."batch_number" = ${batchNumber}
+    WHERE UPPER(BTRIM(s."batch_number")) = ${normalizedBatchNumber}
   `;
   return Number(result?.[0]?.maxSequence || 0) + 1;
 }
