@@ -13,6 +13,7 @@ import {
   listCustomersHandler,
   listOrdersHandler,
   exportOrdersHandler,
+  updatePreferredPickupLocationHandler,
   updateFulfillmentStatusHandler,
   confirmInteracPaymentHandler,
   createAdminIncompleteOrderUploadHandler,
@@ -30,6 +31,12 @@ import {
   listPickupNoticesHandler,
   sendPickupNoticesHandler,
 } from '../controllers/adminController.js';
+import {
+  listAdminPickupLocationsHandler,
+  createPickupLocationHandler,
+  updatePickupLocationHandler,
+  deletePickupLocationHandler,
+} from '../controllers/pickupLocationController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
 
 const router = Router();
@@ -62,8 +69,13 @@ router.post('/discount-orders/upload-url', requireAdminRoles('ADMIN', 'SUPERADMI
 router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), createDiscountOrderHandler);
 router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticesHandler);
 router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
+router.get('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), listAdminPickupLocationsHandler);
+router.post('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), createPickupLocationHandler);
+router.patch('/pickup-locations/:pickupLocationId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePickupLocationHandler);
+router.delete('/pickup-locations/:pickupLocationId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deletePickupLocationHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
+router.patch('/orders/:orderReference/preferred-pickup-location', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePreferredPickupLocationHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
 router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminIncompleteOrderUploadHandler);

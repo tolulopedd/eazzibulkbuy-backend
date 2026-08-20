@@ -4,6 +4,7 @@ import orderRoutes from './routes/orderRoutes.js';
 import groupBuyRoutes from './routes/groupBuyRoutes.js';
 import customerRoutes from './routes/customerRoutes.js';
 import salesItemRoutes from './routes/salesItemRoutes.js';
+import pickupLocationRoutes from './routes/pickupLocationRoutes.js';
 import adminAuthRoutes from './routes/adminAuthRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import { stripeWebhookHandler } from './controllers/webhookController.js';
@@ -60,6 +61,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/group-buys', groupBuyRoutes);
 app.use('/api/sales-items', salesItemRoutes);
+app.use('/api/pickup-locations', pickupLocationRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);

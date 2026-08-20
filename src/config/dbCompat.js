@@ -1,4 +1,5 @@
 import { prisma } from './prisma.js';
+import { DEFAULT_PICKUP_LOCATIONS } from '../services/pickupLocationService.js';
 
 export async function ensureDatabaseCompatibility() {
   await prisma.$executeRawUnsafe(`
@@ -114,4 +115,32 @@ export async function ensureDatabaseCompatibility() {
     END
     $$;
   `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "pickup_locations" (
+      "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "name" TEXT NOT NULL,
+      "is_active" BOOLEAN NOT NULL DEFAULT true,
+      "sort_order" INTEGER NOT NULL DEFAULT 0,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "pickup_locations_pkey" PRIMARY KEY ("id")
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "pickup_locations_name_key" ON "pickup_locations"("name");
+  `);
+
+  for (const location of DEFAULT_PICKUP_LOCATIONS) {
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "pickup_locations" ("name", "is_active", "sort_order")
+      SELECT $1, true, $2
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM "pickup_locations"
+        WHERE "name" = $1
+      );
+    `, location.name, location.sortOrder);
+  }
 }

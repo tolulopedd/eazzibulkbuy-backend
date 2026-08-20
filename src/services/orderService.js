@@ -19,6 +19,7 @@ import {
   DISCOUNT_ORDER_SYSTEM_LOCATION,
   DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME,
 } from '../constants/systemSalesItems.js';
+import { hasActivePickupLocation } from './pickupLocationService.js';
 
 function buildBuyerName({ title, firstName, lastName }) {
   return [title, firstName, lastName].filter(Boolean).join(' ').trim();
@@ -187,6 +188,7 @@ export async function createPendingOrder(payload) {
     postalCode,
     items,
     paymentMethod,
+    preferredPickupLocation,
   } = payload;
   const name = buildBuyerName({ title, firstName, lastName });
   const uniqueSalesItemIds = [...new Set(items.map((item) => item.salesItemId))];
@@ -225,6 +227,22 @@ export async function createPendingOrder(payload) {
   if (fulfillmentMethods.length > 1) {
     throw new Error('All items in the cart must use the same pickup option.');
   }
+  const orderFulfillmentMethod = orderLines.some((line) => line.fulfillmentMethod === 'DELIVERY') ? 'DELIVERY' : 'PICKUP';
+
+  if (orderFulfillmentMethod === 'PICKUP' && !preferredPickupLocation) {
+    throw new Error('Select your preferred pickup location before creating your order.');
+  }
+
+  if (orderFulfillmentMethod === 'DELIVERY' && preferredPickupLocation) {
+    throw new Error('Preferred pickup location is only needed for pickup orders.');
+  }
+
+  if (orderFulfillmentMethod === 'PICKUP' && preferredPickupLocation) {
+    const isActivePickupLocation = await hasActivePickupLocation(preferredPickupLocation);
+    if (!isActivePickupLocation) {
+      throw new Error('Selected pickup location is no longer available. Please choose an active pickup location.');
+    }
+  }
 
   const primaryLine = orderLines[0];
   const subtotal = orderLines.reduce((sum, line) => sum + line.lineTotal, 0);
@@ -241,6 +259,7 @@ export async function createPendingOrder(payload) {
   });
   const manualInstructions = null;
   const cartSnapshot = {
+    preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
     items: orderLines.map((line) => ({
       salesItemId: line.salesItemId,
       batchNumber: line.salesItem.batchNumber,
@@ -264,6 +283,7 @@ export async function createPendingOrder(payload) {
           }))
         : [],
       location: line.salesItem.pickupInstructions,
+      preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
       deliveryConfig: {
         enabled: line.salesItem.deliveryEnabled,
         baseRangeMax: line.salesItem.deliveryBaseRangeMax,
@@ -343,8 +363,9 @@ export async function createPendingOrder(payload) {
         userId: user.id,
         salesItemId: primaryLine.salesItem.id,
         quantity: totalQuantity,
-        fulfillmentMethod: orderLines.some((line) => line.fulfillmentMethod === 'DELIVERY') ? 'DELIVERY' : 'PICKUP',
-        fulfillmentStatus: getInitialFulfillmentStatus(orderLines.some((line) => line.fulfillmentMethod === 'DELIVERY') ? 'DELIVERY' : 'PICKUP'),
+        fulfillmentMethod: orderFulfillmentMethod,
+        fulfillmentStatus: getInitialFulfillmentStatus(orderFulfillmentMethod),
+        preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
         unitPrice: primaryLine.salesItem.pricePerUnit,
         paymentMethod: storedPaymentMethod,
         currency: primaryLine.salesItem.currency,
@@ -384,6 +405,7 @@ export async function createPendingOrder(payload) {
     deliveryFee: order.serviceFee,
     stripeProcessingFee,
     fulfillmentMethod: order.fulfillmentMethod,
+    preferredPickupLocation: order.preferredPickupLocation,
     cartItems: cartSnapshot.items,
     paymentMethod: hasExplicitPaymentMethod ? order.paymentMethod : null,
     paymentInstructions: resolvedManualInstructions,

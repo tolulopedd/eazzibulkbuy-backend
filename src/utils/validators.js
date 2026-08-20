@@ -24,30 +24,49 @@ export const createOrderSchema = z.object({
   paymentMethod: z
     .preprocess((v) => sanitizeText(v), z.enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY']))
     .optional(),
+  preferredPickupLocation: z
+    .preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(180).optional()),
 }).superRefine((payload, ctx) => {
-  if (payload.existingCustomerId) {
-    return;
+  if (!payload.existingCustomerId) {
+    const requiredFields = [
+      ['firstName', payload.firstName],
+      ['lastName', payload.lastName],
+      ['email', payload.email],
+      ['phone', payload.phone],
+      ['address', payload.address],
+      ['city', payload.city],
+      ['province', payload.province],
+      ['postalCode', payload.postalCode],
+    ];
+
+    for (const [field, value] of requiredFields) {
+      if (!value) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: 'Required',
+        });
+      }
+    }
   }
 
-  const requiredFields = [
-    ['firstName', payload.firstName],
-    ['lastName', payload.lastName],
-    ['email', payload.email],
-    ['phone', payload.phone],
-    ['address', payload.address],
-    ['city', payload.city],
-    ['province', payload.province],
-    ['postalCode', payload.postalCode],
-  ];
+  const usesPickup = payload.items.some((item) => item.fulfillmentMethod === 'PICKUP');
+  const usesDelivery = payload.items.some((item) => item.fulfillmentMethod === 'DELIVERY');
 
-  for (const [field, value] of requiredFields) {
-    if (!value) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: [field],
-        message: 'Required',
-      });
-    }
+  if (usesPickup && !payload.preferredPickupLocation) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['preferredPickupLocation'],
+      message: 'Select your preferred pickup location.',
+    });
+  }
+
+  if (usesDelivery && payload.preferredPickupLocation) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['preferredPickupLocation'],
+      message: 'Preferred pickup location is only needed for pickup orders.',
+    });
   }
 });
 

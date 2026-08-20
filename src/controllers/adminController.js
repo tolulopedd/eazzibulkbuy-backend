@@ -23,6 +23,7 @@ import {
 import { sendWhatsAppTextMessage } from '../services/messagingService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
+import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
 
 function getAdminResolutionAction(order) {
   return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
@@ -45,6 +46,22 @@ function isOrderPaidLike(order) {
     order.status === 'PAID' ||
     Boolean(order.paidAt)
   );
+}
+
+function isOrderPaidForOverview(order) {
+  if (isOrderResolvedAwayFromPaid(order)) {
+    return false;
+  }
+
+  return order?.paymentStatus === 'PAID';
+}
+
+function isOrderPendingPaymentForOverview(order) {
+  if (isOrderResolvedAwayFromPaid(order)) {
+    return false;
+  }
+
+  return ['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW'].includes(order?.paymentStatus);
 }
 
 function escapeCsv(value) {
@@ -140,6 +157,7 @@ function buildFallbackSnapshotItem(order) {
     fulfillmentStatus: order.fulfillmentStatus,
     batchNumber: order.salesItem?.batchNumber || '',
     location: order.salesItem?.pickupInstructions || '',
+    preferredPickupLocation: order.preferredPickupLocation || null,
     saleType: order.salesItem?.saleType || 'NORMAL_SALE',
     bundleItems: [],
   };
@@ -157,6 +175,7 @@ function buildPickupNoticeMessageText({
   itemsSummary,
   fulfillmentMethod,
   address,
+  preferredPickupLocation,
   readyDate,
   timeWindow,
   contactName,
@@ -168,18 +187,21 @@ function buildPickupNoticeMessageText({
   return [
     `Hello ${firstName},`,
     '',
+    '',
     isDelivery
       ? 'Your paid order is now ready for delivery coordination.'
       : 'Your paid order is now ready for pickup.',
     '',
     `Order reference: ${displayOrderReference}`,
     `Items: ${itemsSummary}`,
+    !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
     `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
     `Date: ${readyDate}`,
     `Time: ${timeWindow}`,
     contactName ? `Contact name: ${contactName}` : null,
     contactPhone ? `Contact phone: ${contactPhone}` : null,
     note ? `Instructions: ${note}` : null,
+    '',
     '',
     'Regards,',
     'EazziBulkBuy.',
@@ -264,6 +286,22 @@ function getOrderBatchNumbers(order) {
 
 function includesInsensitive(value, query) {
   return String(value || '').toLowerCase().includes(String(query || '').toLowerCase());
+}
+
+function normalizePickupLocationText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[–—]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getPickupNoticeLocationValue(row) {
+  if (row?.fulfillmentMethod === 'PICKUP') {
+    return row.preferredPickupLocation || row.location || '';
+  }
+
+  return row?.location || '';
 }
 
 function parseBatchNumberFilters(value) {
@@ -411,6 +449,7 @@ function normalizeFulfillmentItems(order) {
         fulfillmentStatusLabel: getFulfillmentStatusLabel(order.fulfillmentStatus),
         batchNumber: order.salesItem?.batchNumber || '',
         location: order.salesItem?.pickupInstructions || '',
+        preferredPickupLocation: order.preferredPickupLocation || null,
         pickupNotice: null,
       },
     ];
@@ -441,6 +480,7 @@ function normalizeFulfillmentItems(order) {
           fulfillmentStatusLabel: getFulfillmentStatusLabel(fulfillmentStatus),
           batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
           location: item.location || order.salesItem?.pickupInstructions || '',
+          preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
           saleType: item.saleType || null,
           bundleItems: [],
           isBundleComponent: true,
@@ -465,6 +505,7 @@ function normalizeFulfillmentItems(order) {
       fulfillmentStatusLabel: getFulfillmentStatusLabel(fulfillmentStatus),
       batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
       location: item.location || order.salesItem?.pickupInstructions || '',
+      preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
       saleType: item.saleType || null,
       bundleItems: Array.isArray(item.bundleItems) ? item.bundleItems : [],
       isBundleComponent: false,
@@ -891,6 +932,10 @@ const sendPickupNoticesSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 
+const updatePreferredPickupLocationSchema = z.object({
+  preferredPickupLocation: z.string().trim().min(2).max(180),
+});
+
 async function findConflictingActiveBatchNumber(batchNumber, excludeSalesItemId) {
   if (!batchNumber) {
     return null;
@@ -1255,7 +1300,7 @@ async function buildAdminReportsData(query) {
     const yearStart = new Date(now.getFullYear(), 0, 1);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const paidOverviewOrders = overviewOrders.filter((order) => isOrderPaidLike(order));
+    const paidOverviewOrders = overviewOrders.filter((order) => isOrderPaidForOverview(order));
     const liveSalesEvents = overviewSalesEvents
       .filter((item) => item.status === 'ACTIVE' && item.closingDate > now)
       .sort((a, b) => a.closingDate.getTime() - b.closingDate.getTime());
@@ -1263,14 +1308,14 @@ async function buildAdminReportsData(query) {
 
     const totalOrdersYtd = overviewOrders.filter((order) => isSameOrAfter(order.createdAt, yearStart)).length;
     const totalOrdersMtd = overviewOrders.filter((order) => isSameOrAfter(order.createdAt, monthStart)).length;
-    const paidOrdersYtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt || order.createdAt, yearStart)).length;
-    const paidOrdersMtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt || order.createdAt, monthStart)).length;
-    const pendingPaymentOrders = overviewOrders.filter((order) => !isOrderPaidLike(order) && !isOrderResolvedAwayFromPaid(order)).length;
+    const paidOrdersYtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt, yearStart)).length;
+    const paidOrdersMtd = paidOverviewOrders.filter((order) => isSameOrAfter(order.paidAt, monthStart)).length;
+    const pendingPaymentOrders = overviewOrders.filter((order) => isOrderPendingPaymentForOverview(order)).length;
     const totalSalesYtd = paidOverviewOrders
-      .filter((order) => isSameOrAfter(order.paidAt || order.createdAt, yearStart))
+      .filter((order) => isSameOrAfter(order.paidAt, yearStart))
       .reduce((sum, order) => sum + order.totalAmount, 0);
     const totalSalesMtd = paidOverviewOrders
-      .filter((order) => isSameOrAfter(order.paidAt || order.createdAt, monthStart))
+      .filter((order) => isSameOrAfter(order.paidAt, monthStart))
       .reduce((sum, order) => sum + order.totalAmount, 0);
     const activeNormalSales = liveSalesEvents.filter((item) => item.saleType === 'NORMAL_SALE').length;
     const activeBundleSales = liveSalesEvents.filter((item) => item.saleType === 'BUNDLE_DISCOUNTED_SALE').length;
@@ -1314,7 +1359,8 @@ async function buildAdminReportsData(query) {
     );
 
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
-    const paidBatchSalesComparison = buildPaidBatchSalesComparison(paidOrders);
+    const dashboardPaidOrders = normalizedOrders.filter((order) => isOrderPaidForOverview(order));
+    const paidBatchSalesComparison = buildPaidBatchSalesComparison(dashboardPaidOrders);
 
     const orderReadyRows = paidOrders.map((order) => ({
       id: order.id,
@@ -1436,8 +1482,8 @@ async function buildAdminReportsData(query) {
       },
       summary: {
         totalOrders: normalizedOrders.length,
-        paidOrders: paidOrders.length,
-        totalRevenue: paidOrders.reduce((sum, order) => sum + order.totalAmount, 0),
+        paidOrders: dashboardPaidOrders.length,
+        totalRevenue: dashboardPaidOrders.reduce((sum, order) => sum + order.totalAmount, 0),
         overview: {
           totalOrdersYtd,
           totalOrdersMtd,
@@ -1454,11 +1500,12 @@ async function buildAdminReportsData(query) {
           nextLiveEvent: nextLiveEvent
             ? {
                 name: nextLiveEvent.name,
-                batchNumber: nextLiveEvent.batchNumber,
-                saleType: nextLiveEvent.saleType,
-                closingDate: nextLiveEvent.closingDate,
-              }
-            : null,
+              batchNumber: nextLiveEvent.batchNumber,
+              saleType: nextLiveEvent.saleType,
+              closingDate: nextLiveEvent.closingDate,
+              pickupInstructions: nextLiveEvent.pickupInstructions,
+            }
+          : null,
           recentCustomers: recentCustomers.map((customer) => ({
             ...customer,
             addressLine: [customer.address, customer.city, customer.province, customer.postalCode]
@@ -1482,7 +1529,7 @@ function sortPickupNoticeRows(rows, query) {
     }
 
     if (query.sortBy === 'location') {
-      return sortDirection * String(left.location || '').localeCompare(String(right.location || ''));
+      return sortDirection * getPickupNoticeLocationValue(left).localeCompare(getPickupNoticeLocationValue(right));
     }
 
     if (query.sortBy === 'buyer') {
@@ -1575,6 +1622,7 @@ async function buildPickupNoticeRows(query) {
       ...order,
       ...item,
       displayOrderReference: getDisplayOrderReference(order),
+      pickupLocationFilterValue: getPickupNoticeLocationValue(item),
       noticeStatus: formatPickupNoticeStatus(item.pickupNotice),
       noticeSentAt: item.pickupNotice?.sentAt || null,
       noticeChannels: item.pickupNotice?.lastResults || {},
@@ -1582,7 +1630,7 @@ async function buildPickupNoticeRows(query) {
     .filter((row) => row.fulfillmentStatus === 'PENDING_PICKUP' || row.fulfillmentStatus === 'PENDING_DELIVERY')
     .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
     .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
-    .filter((row) => !query.location || includesInsensitive(row.location, query.location))
+    .filter((row) => !query.location || normalizePickupLocationText(row.pickupLocationFilterValue).includes(normalizePickupLocationText(query.location)))
     .filter((row) => !query.batchNumber || parseBatchNumberFilters(query.batchNumber).some((batch) => includesInsensitive(row.batchNumber, batch)))
     .filter((row) => {
       if (!query.q) {
@@ -1598,11 +1646,13 @@ async function buildPickupNoticeRows(query) {
         row.batchNumber,
         row.name,
         row.location,
+        row.preferredPickupLocation,
+        row.pickupLocationFilterValue,
       ].some((value) => includesInsensitive(value, query.q));
     });
 
   const rows = sortPickupNoticeRows(filteredRows, query);
-  const locations = [...new Set(rows.map((row) => row.location).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const locations = await getActivePickupLocationNames();
 
   return {
     rows,
@@ -1691,12 +1741,16 @@ export async function sendPickupNoticesHandler(req, res, next) {
       const itemsSummary = formatPickupNoticeItemSummary(selectedRows);
       const firstName = order.user?.firstName || order.user?.name || 'Customer';
       const displayOrderReference = getDisplayOrderReference(order);
+      const preferredPickupLocation = order.fulfillmentMethod === 'PICKUP'
+        ? (selectedRows.find((row) => row.preferredPickupLocation)?.preferredPickupLocation || order.preferredPickupLocation || '')
+        : '';
       const messageText = buildPickupNoticeMessageText({
         firstName,
         displayOrderReference,
         itemsSummary,
         fulfillmentMethod: order.fulfillmentMethod,
         address: payload.address,
+        preferredPickupLocation,
         readyDate: payload.readyDate,
         timeWindow: payload.timeWindow,
         contactName: payload.contactName,
@@ -1717,6 +1771,7 @@ export async function sendPickupNoticesHandler(req, res, next) {
               itemsSummary,
               fulfillmentMethod: order.fulfillmentMethod,
               address: payload.address,
+              preferredPickupLocation,
               readyDate: payload.readyDate,
               timeWindow: payload.timeWindow,
               contactName: payload.contactName,
@@ -1763,6 +1818,7 @@ export async function sendPickupNoticesHandler(req, res, next) {
               pickupNotice: {
                 ...previous,
                 address: payload.address,
+                preferredPickupLocation,
                 readyDate: payload.readyDate,
                 timeWindow: payload.timeWindow,
                 contactName: payload.contactName || '',
@@ -1793,6 +1849,7 @@ export async function sendPickupNoticesHandler(req, res, next) {
           pickupNotice: {
             ...previous,
             address: payload.address,
+            preferredPickupLocation,
             readyDate: payload.readyDate,
             timeWindow: payload.timeWindow,
             contactName: payload.contactName || '',
@@ -2687,6 +2744,103 @@ export async function exportCustomersHandler(req, res, next) {
   }
 }
 
+export async function updatePreferredPickupLocationHandler(req, res, next) {
+  try {
+    const orderReference = z.string().uuid().parse(req.params.orderReference);
+    const payload = updatePreferredPickupLocationSchema.parse(req.body);
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference },
+      select: {
+        id: true,
+        notes: true,
+        fulfillmentMethod: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (order.fulfillmentMethod !== 'PICKUP') {
+      return res.status(409).json({ message: 'Preferred pickup location can only be set for pickup orders.' });
+    }
+
+    const isActivePickupLocation = await hasActivePickupLocation(payload.preferredPickupLocation);
+    if (!isActivePickupLocation) {
+      return res.status(409).json({ message: 'Selected pickup location is no longer active.' });
+    }
+
+    const snapshot = parseOrderNotes(order.notes);
+    const nextItems = Array.isArray(snapshot?.items)
+      ? snapshot.items.map((item) => ({
+          ...item,
+          preferredPickupLocation: payload.preferredPickupLocation,
+        }))
+      : undefined;
+
+    const updatedOrder = await prisma.order.update({
+      where: { orderReference },
+      data: {
+        preferredPickupLocation: payload.preferredPickupLocation,
+        ...(nextItems
+          ? {
+              notes: JSON.stringify({
+                ...(snapshot || {}),
+                preferredPickupLocation: payload.preferredPickupLocation,
+                items: nextItems,
+              }),
+            }
+          : {}),
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            providerReference: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    return res.json({
+      message: 'Preferred pickup location updated successfully.',
+      order: {
+        ...updatedOrder,
+        displayOrderReference: getDisplayOrderReference(updatedOrder),
+        fulfillmentItems: normalizeFulfillmentItems(updatedOrder),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function listOrdersHandler(req, res, next) {
   try {
     const query = listOrdersQuerySchema.parse(req.query);
@@ -2903,6 +3057,7 @@ export async function exportOrdersHandler(req, res, next) {
         'Order Status',
         'Fulfillment Method',
         'Fulfillment Status',
+        'Preferred Pickup Location',
         'Total Amount (CAD)',
         'Created At',
         'Paid At',
@@ -2925,6 +3080,7 @@ export async function exportOrdersHandler(req, res, next) {
         order.status,
         order.fulfillmentMethod,
         order.fulfillmentStatus,
+        order.preferredPickupLocation || '',
         (order.totalAmount / 100).toFixed(2),
         order.createdAt?.toISOString() || '',
         order.paidAt?.toISOString() || '',

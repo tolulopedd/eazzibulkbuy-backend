@@ -17,7 +17,16 @@ function formatMoney(cents) {
   return `CAD ${(cents / 100).toFixed(2)}`;
 }
 
-async function sendWithResend({ to, subject, text }) {
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function sendWithResend({ to, subject, text, html }) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -29,6 +38,7 @@ async function sendWithResend({ to, subject, text }) {
       to: Array.isArray(to) ? to : [to],
       subject,
       text,
+      ...(html ? { html } : {}),
     }),
   });
 
@@ -40,19 +50,20 @@ async function sendWithResend({ to, subject, text }) {
   return response.json().catch(() => ({}));
 }
 
-async function sendWithSmtp({ to, subject, text }) {
+async function sendWithSmtp({ to, subject, text, html }) {
   await smtpTransporter.sendMail({
     from: env.smtpFrom,
     to,
     subject,
     text,
+    ...(html ? { html } : {}),
   });
 }
 
-export async function sendMail({ to, subject, text }) {
+export async function sendMail({ to, subject, text, html }) {
   if (isResendConfigured) {
     try {
-      await sendWithResend({ to, subject, text });
+      await sendWithResend({ to, subject, text, html });
       return;
     } catch (error) {
       console.error('Resend delivery failed, falling back to next provider', {
@@ -65,7 +76,7 @@ export async function sendMail({ to, subject, text }) {
 
   if (smtpTransporter) {
     try {
-      await sendWithSmtp({ to, subject, text });
+      await sendWithSmtp({ to, subject, text, html });
       return;
     } catch (error) {
       console.error('SMTP delivery failed, using dry-run fallback', {
@@ -77,7 +88,7 @@ export async function sendMail({ to, subject, text }) {
     }
   }
 
-  console.log('[email:dry-run]', { provider: 'dry-run', to, subject, text });
+  console.log('[email:dry-run]', { provider: 'dry-run', to, subject, text, html });
 }
 
 export async function sendOrderPaidEmail({
@@ -147,6 +158,7 @@ export async function sendOrderReadyNoticeEmail({
   itemsSummary,
   fulfillmentMethod,
   address,
+  preferredPickupLocation,
   readyDate,
   timeWindow,
   contactName,
@@ -154,6 +166,30 @@ export async function sendOrderReadyNoticeEmail({
   note,
 }) {
   const isDelivery = fulfillmentMethod === 'DELIVERY';
+  const htmlLines = [
+    `<p style="margin:0 0 20px 0;">Hello ${escapeHtml(firstName)},</p>`,
+    `<p style="margin:0 0 20px 0;">${
+      isDelivery
+        ? 'Your paid order is now ready for delivery coordination.'
+        : 'Your paid order is now ready for pickup.'
+    }</p>`,
+    `<p style="margin:0 0 20px 0;">Order reference: ${escapeHtml(displayOrderReference)}<br />Items: ${escapeHtml(itemsSummary)}</p>`,
+    !isDelivery && preferredPickupLocation
+      ? `<p style="margin:0 0 20px 0;">Preferred pickup location: ${escapeHtml(preferredPickupLocation)}</p>`
+      : null,
+    `<p style="margin:0 0 20px 0;">${escapeHtml(isDelivery ? 'Dispatch / meeting address' : 'Pickup address')}: ${escapeHtml(address)}<br />Date: ${escapeHtml(readyDate)}<br />Time: ${escapeHtml(timeWindow)}${
+      contactName ? `<br />Contact name: ${escapeHtml(contactName)}` : ''
+    }${contactPhone ? `<br />Contact phone: ${escapeHtml(contactPhone)}` : ''}</p>`,
+    note ? `<p style="margin:0 0 20px 0;">Instructions: ${escapeHtml(note)}</p>` : null,
+    `<p style="margin:0 0 20px 0;">${
+      isDelivery
+        ? 'Please watch for further coordination from our team if needed.'
+        : 'Please arrive within the stated time window to receive your order.'
+    }</p>`,
+    '<p style="margin:28px 0 0 0;">Regards,<br />EazziBulkBuy.</p>',
+  ]
+    .filter(Boolean)
+    .join('');
 
   await sendMail({
     to: email,
@@ -161,12 +197,14 @@ export async function sendOrderReadyNoticeEmail({
     text: [
       `Hello ${firstName},`,
       '',
+      '',
       isDelivery
         ? 'Your paid order is now ready for delivery coordination.'
         : 'Your paid order is now ready for pickup.',
       '',
       `Order reference: ${displayOrderReference}`,
       `Items: ${itemsSummary}`,
+      !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
       `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
       `Date: ${readyDate}`,
       `Time: ${timeWindow}`,
@@ -174,13 +212,20 @@ export async function sendOrderReadyNoticeEmail({
       contactPhone ? `Contact phone: ${contactPhone}` : null,
       note ? `Instructions: ${note}` : null,
       '',
+      '',
       isDelivery
         ? 'Please watch for further coordination from our team if needed.'
         : 'Please arrive within the stated time window to receive your order.',
       '',
+      '',
       'Regards,',
       'EazziBulkBuy.',
     ].filter(Boolean).join('\n'),
+    html: `
+      <div style="font-family:Arial,Helvetica,sans-serif; color:#0f172a; font-size:16px; line-height:1.7;">
+        ${htmlLines}
+      </div>
+    `,
   });
 }
 
