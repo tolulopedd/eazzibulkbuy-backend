@@ -148,6 +148,15 @@ function normalizeBatchNumber(value) {
   return String(value || '').trim().toUpperCase();
 }
 
+function buildDisplayOrderReferencePrefix(createdAt, batchNumber) {
+  const date = createdAt ? new Date(createdAt) : new Date();
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  const day = String(safeDate.getDate()).padStart(2, '0');
+  const month = safeDate.toLocaleString('en-US', { month: 'short' });
+  const normalizedBatch = normalizeBatchNumber(batchNumber);
+  return normalizedBatch ? `${day}${month}-${normalizedBatch}-` : `${day}${month}-`;
+}
+
 function isDisplayOrderReferenceUniqueConstraintError(error) {
   return (
     error?.code === 'P2002' &&
@@ -160,20 +169,18 @@ function isDisplayOrderReferenceUniqueConstraintError(error) {
 }
 
 async function reserveNextOrderSequence(tx, batchNumber) {
-  const normalizedBatchNumber = normalizeBatchNumber(batchNumber);
-  await tx.$queryRaw`
-    SELECT "id"
-    FROM "sales_items"
-    WHERE UPPER(BTRIM("batch_number")) = ${normalizedBatchNumber}
-    FOR UPDATE
-  `;
+  const orderCreatedAt = new Date();
+  const prefix = buildDisplayOrderReferencePrefix(orderCreatedAt, batchNumber);
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`;
   const result = await tx.$queryRaw`
-    SELECT COALESCE(MAX(o."order_sequence"), 0) AS "maxSequence"
-    FROM "orders" o
-    INNER JOIN "sales_items" s ON s."id" = o."sales_item_id"
-    WHERE UPPER(BTRIM(s."batch_number")) = ${normalizedBatchNumber}
+    SELECT COALESCE(MAX(CAST(RIGHT("display_order_reference", 4) AS INTEGER)), 0) AS "maxSequence"
+    FROM "orders"
+    WHERE "display_order_reference" LIKE ${`${prefix}%`}
   `;
-  return Number(result?.[0]?.maxSequence || 0) + 1;
+  return {
+    orderSequence: Number(result?.[0]?.maxSequence || 0) + 1,
+    orderCreatedAt,
+  };
 }
 
 async function ensureDiscountOrderAnchorSalesItem(tx) {
@@ -376,8 +383,7 @@ export async function createPendingOrder(payload) {
           });
         }
 
-        const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
-        const orderCreatedAt = new Date();
+        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
         const displayOrderReference = formatDisplayOrderReference({
           createdAt: orderCreatedAt,
           batchNumber: primaryLine.salesItem.batchNumber,
@@ -631,8 +637,7 @@ export async function createAdminDiscountOrder(payload) {
       order = await prisma.$transaction(async (tx) => {
         const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
           || await ensureDiscountOrderAnchorSalesItem(tx);
-        const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
-        const orderCreatedAt = new Date();
+        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
         const displayOrderReference = formatDisplayOrderReference({
           createdAt: orderCreatedAt,
           batchNumber: anchorSalesItem.batchNumber,
