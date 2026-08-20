@@ -144,9 +144,19 @@ function isCardPaymentMethod(paymentMethod) {
   return paymentMethod === 'STRIPE_CARD' || paymentMethod === 'HELCIM_CARD';
 }
 
-async function reserveNextOrderSequence(tx, salesItemId) {
-  await tx.$queryRaw`SELECT "id" FROM "sales_items" WHERE "id" = ${salesItemId} FOR UPDATE`;
-  const result = await tx.$queryRaw`SELECT COALESCE(MAX("order_sequence"), 0) AS "maxSequence" FROM "orders" WHERE "sales_item_id" = ${salesItemId}`;
+async function reserveNextOrderSequence(tx, batchNumber) {
+  await tx.$queryRaw`
+    SELECT "id"
+    FROM "sales_items"
+    WHERE "batch_number" = ${batchNumber}
+    FOR UPDATE
+  `;
+  const result = await tx.$queryRaw`
+    SELECT COALESCE(MAX(o."order_sequence"), 0) AS "maxSequence"
+    FROM "orders" o
+    INNER JOIN "sales_items" s ON s."id" = o."sales_item_id"
+    WHERE s."batch_number" = ${batchNumber}
+  `;
   return Number(result?.[0]?.maxSequence || 0) + 1;
 }
 
@@ -347,7 +357,7 @@ export async function createPendingOrder(payload) {
       });
     }
 
-    const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.id);
+    const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
     const orderCreatedAt = new Date();
     const displayOrderReference = formatDisplayOrderReference({
       createdAt: orderCreatedAt,
@@ -592,7 +602,7 @@ export async function createAdminDiscountOrder(payload) {
   const order = await prisma.$transaction(async (tx) => {
     const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
       || await ensureDiscountOrderAnchorSalesItem(tx);
-    const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.id);
+    const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
     const orderCreatedAt = new Date();
     const displayOrderReference = formatDisplayOrderReference({
       createdAt: orderCreatedAt,
