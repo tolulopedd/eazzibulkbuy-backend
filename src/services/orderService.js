@@ -144,6 +144,14 @@ function isCardPaymentMethod(paymentMethod) {
   return paymentMethod === 'STRIPE_CARD' || paymentMethod === 'HELCIM_CARD';
 }
 
+function isDisplayOrderReferenceUniqueConstraintError(error) {
+  return (
+    error?.code === 'P2002' &&
+    Array.isArray(error?.meta?.target) &&
+    error.meta.target.includes('display_order_reference')
+  );
+}
+
 async function reserveNextOrderSequence(tx, batchNumber) {
   await tx.$queryRaw`
     SELECT "id"
@@ -306,94 +314,104 @@ export async function createPendingOrder(payload) {
     .map((line) => `${line.salesItem.name} x${line.quantity}`)
     .join(', ');
 
-  const order = await prisma.$transaction(async (tx) => {
-    let user;
+  let order;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      order = await prisma.$transaction(async (tx) => {
+        let user;
 
-    if (existingCustomerId) {
-      user = await tx.user.findFirst({
-        where: {
-          id: existingCustomerId,
-          role: 'USER',
-          isActive: true,
-        },
-        select: {
-          id: true,
-        },
-      });
+        if (existingCustomerId) {
+          user = await tx.user.findFirst({
+            where: {
+              id: existingCustomerId,
+              role: 'USER',
+              isActive: true,
+            },
+            select: {
+              id: true,
+            },
+          });
 
-      if (!user) {
-        throw new Error('Selected buyer could not be found.');
-      }
-    } else {
-      user = await tx.user.upsert({
-        where: { email },
-        update: {
-          name,
-          title: title ?? null,
-          firstName,
-          lastName,
-          phone,
-          address,
-          city,
-          province,
-          postalCode,
-        },
-        create: {
-          name,
-          title,
-          firstName,
-          lastName,
-          email,
-          role: 'USER',
-          phone,
-          address,
-          city,
-          province,
-          postalCode,
-        },
-        select: {
-          id: true,
-        },
-      });
-    }
+          if (!user) {
+            throw new Error('Selected buyer could not be found.');
+          }
+        } else {
+          user = await tx.user.upsert({
+            where: { email },
+            update: {
+              name,
+              title: title ?? null,
+              firstName,
+              lastName,
+              phone,
+              address,
+              city,
+              province,
+              postalCode,
+            },
+            create: {
+              name,
+              title,
+              firstName,
+              lastName,
+              email,
+              role: 'USER',
+              phone,
+              address,
+              city,
+              province,
+              postalCode,
+            },
+            select: {
+              id: true,
+            },
+          });
+        }
 
-    const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
-    const orderCreatedAt = new Date();
-    const displayOrderReference = formatDisplayOrderReference({
-      createdAt: orderCreatedAt,
-      batchNumber: primaryLine.salesItem.batchNumber,
-      orderSequence,
-    });
+        const orderSequence = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
+        const orderCreatedAt = new Date();
+        const displayOrderReference = formatDisplayOrderReference({
+          createdAt: orderCreatedAt,
+          batchNumber: primaryLine.salesItem.batchNumber,
+          orderSequence,
+        });
 
-    return tx.order.create({
-      data: {
-        createdAt: orderCreatedAt,
-        displayOrderReference,
-        orderSequence,
-        userId: user.id,
-        salesItemId: primaryLine.salesItem.id,
-        quantity: totalQuantity,
-        fulfillmentMethod: orderFulfillmentMethod,
-        fulfillmentStatus: getInitialFulfillmentStatus(orderFulfillmentMethod),
-        preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
-        unitPrice: primaryLine.salesItem.pricePerUnit,
-        paymentMethod: storedPaymentMethod,
-        currency: primaryLine.salesItem.currency,
-        subtotal,
-        serviceFee: deliveryFee,
-        totalAmount,
-        notes: JSON.stringify(cartSnapshot),
-        status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
-        paymentStatus: 'PENDING_PAYMENT',
-        payment: {
-          create: {
-            method: storedPaymentMethod,
-            status: 'PENDING_PAYMENT',
+        return tx.order.create({
+          data: {
+            createdAt: orderCreatedAt,
+            displayOrderReference,
+            orderSequence,
+            userId: user.id,
+            salesItemId: primaryLine.salesItem.id,
+            quantity: totalQuantity,
+            fulfillmentMethod: orderFulfillmentMethod,
+            fulfillmentStatus: getInitialFulfillmentStatus(orderFulfillmentMethod),
+            preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
+            unitPrice: primaryLine.salesItem.pricePerUnit,
+            paymentMethod: storedPaymentMethod,
+            currency: primaryLine.salesItem.currency,
+            subtotal,
+            serviceFee: deliveryFee,
+            totalAmount,
+            notes: JSON.stringify(cartSnapshot),
+            status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
+            paymentStatus: 'PENDING_PAYMENT',
+            payment: {
+              create: {
+                method: storedPaymentMethod,
+                status: 'PENDING_PAYMENT',
+              },
+            },
           },
-        },
-      },
-    });
-  });
+        });
+      });
+      break;
+    } catch (error) {
+      if (!isDisplayOrderReferenceUniqueConstraintError(error) || attempt === 3) {
+        throw error;
+      }
+    }
+  }
 
   const displayOrderReference = getDisplayOrderReference(order, {
     batchNumber: primaryLine.salesItem.batchNumber,
@@ -599,63 +617,73 @@ export async function createAdminDiscountOrder(payload) {
     })),
   };
 
-  const order = await prisma.$transaction(async (tx) => {
-    const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
-      || await ensureDiscountOrderAnchorSalesItem(tx);
-    const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
-    const orderCreatedAt = new Date();
-    const displayOrderReference = formatDisplayOrderReference({
-      createdAt: orderCreatedAt,
-      batchNumber: anchorSalesItem.batchNumber,
-      orderSequence,
-    });
+  let order;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      order = await prisma.$transaction(async (tx) => {
+        const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
+          || await ensureDiscountOrderAnchorSalesItem(tx);
+        const orderSequence = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
+        const orderCreatedAt = new Date();
+        const displayOrderReference = formatDisplayOrderReference({
+          createdAt: orderCreatedAt,
+          batchNumber: anchorSalesItem.batchNumber,
+          orderSequence,
+        });
 
-    return tx.order.create({
-      data: {
-        createdAt: orderCreatedAt,
-        displayOrderReference,
-        orderSequence,
-        userId: user.id,
-        salesItemId: anchorSalesItem.id,
-        quantity: orderLines.reduce((sum, line) => sum + line.quantity, 0),
-        fulfillmentMethod,
-        fulfillmentStatus: getInitialFulfillmentStatus(fulfillmentMethod),
-        unitPrice: orderLines[0]?.unitPrice || 0,
-        paymentMethod,
-        currency: anchorSalesItem.currency || 'CAD',
-        subtotal,
-        serviceFee: deliveryFee,
-        totalAmount,
-        notes: JSON.stringify(cartSnapshot),
-        status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
-        paymentStatus: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
-        payment: {
-          create: {
-            method: paymentMethod,
-            status: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
-            providerPayloadJson: {
-              adminDiscount: discountMetadata,
-              ...(transferProof ? { transferProof: buildStoredTransferProof(transferProof) } : {}),
-              ...(isManualFlow
-                ? {
-                    adminRecovery: {
-                      comment: discountReason,
-                      updatedByUserId: adminUserId,
-                      updatedAt: new Date().toISOString(),
-                    },
-                  }
-                : {}),
+        return tx.order.create({
+          data: {
+            createdAt: orderCreatedAt,
+            displayOrderReference,
+            orderSequence,
+            userId: user.id,
+            salesItemId: anchorSalesItem.id,
+            quantity: orderLines.reduce((sum, line) => sum + line.quantity, 0),
+            fulfillmentMethod,
+            fulfillmentStatus: getInitialFulfillmentStatus(fulfillmentMethod),
+            unitPrice: orderLines[0]?.unitPrice || 0,
+            paymentMethod,
+            currency: anchorSalesItem.currency || 'CAD',
+            subtotal,
+            serviceFee: deliveryFee,
+            totalAmount,
+            notes: JSON.stringify(cartSnapshot),
+            status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
+            paymentStatus: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
+            payment: {
+              create: {
+                method: paymentMethod,
+                status: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
+                providerPayloadJson: {
+                  adminDiscount: discountMetadata,
+                  ...(transferProof ? { transferProof: buildStoredTransferProof(transferProof) } : {}),
+                  ...(isManualFlow
+                    ? {
+                        adminRecovery: {
+                          comment: discountReason,
+                          updatedByUserId: adminUserId,
+                          updatedAt: new Date().toISOString(),
+                        },
+                      }
+                    : {}),
+                },
+              },
             },
           },
-        },
-      },
-      include: {
-        user: true,
-        salesItem: true,
-        payment: true,
-      },
-    });
-  });
+          include: {
+            user: true,
+            salesItem: true,
+            payment: true,
+          },
+        });
+      });
+      break;
+    } catch (error) {
+      if (!isDisplayOrderReferenceUniqueConstraintError(error) || attempt === 3) {
+        throw error;
+      }
+    }
+  }
 
   const displayOrderReference = getDisplayOrderReference(order);
 
