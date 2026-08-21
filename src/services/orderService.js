@@ -168,17 +168,45 @@ function isDisplayOrderReferenceUniqueConstraintError(error) {
   );
 }
 
-async function reserveNextOrderSequence(tx, batchNumber) {
+function isOrderSequenceUniqueConstraintError(error) {
+  return (
+    error?.code === 'P2002' &&
+    (
+      (Array.isArray(error?.meta?.target) &&
+        error.meta.target.includes('sales_item_id') &&
+        error.meta.target.includes('order_sequence'))
+      || String(error?.meta?.target || '').includes('sales_item_id')
+      || String(error?.meta?.target || '').includes('order_sequence')
+      || String(error?.message || '').includes('sales_item_id')
+      || String(error?.message || '').includes('order_sequence')
+    )
+  );
+}
+
+async function reserveNextOrderSequence(tx, { batchNumber, salesItemId }) {
   const orderCreatedAt = new Date();
   const prefix = buildDisplayOrderReferencePrefix(orderCreatedAt, batchNumber);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${String(salesItemId)}))`;
   const result = await tx.$queryRaw`
-    SELECT COALESCE(MAX(CAST(RIGHT("display_order_reference", 4) AS INTEGER)), 0) AS "maxSequence"
+    SELECT
+      COALESCE(MAX(CASE
+        WHEN "display_order_reference" LIKE ${`${prefix}%`}
+        THEN CAST(RIGHT("display_order_reference", 4) AS INTEGER)
+        ELSE NULL
+      END), 0) AS "maxDisplaySequence",
+      COALESCE(MAX(CASE
+        WHEN "sales_item_id" = ${salesItemId}
+        THEN "order_sequence"
+        ELSE NULL
+      END), 0) AS "maxSalesItemSequence"
     FROM "orders"
-    WHERE "display_order_reference" LIKE ${`${prefix}%`}
   `;
   return {
-    orderSequence: Number(result?.[0]?.maxSequence || 0) + 1,
+    orderSequence: Math.max(
+      Number(result?.[0]?.maxDisplaySequence || 0),
+      Number(result?.[0]?.maxSalesItemSequence || 0),
+    ) + 1,
     orderCreatedAt,
   };
 }
@@ -383,7 +411,10 @@ export async function createPendingOrder(payload) {
           });
         }
 
-        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, primaryLine.salesItem.batchNumber);
+        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, {
+          batchNumber: primaryLine.salesItem.batchNumber,
+          salesItemId: primaryLine.salesItem.id,
+        });
         const displayOrderReference = formatDisplayOrderReference({
           createdAt: orderCreatedAt,
           batchNumber: primaryLine.salesItem.batchNumber,
@@ -421,7 +452,10 @@ export async function createPendingOrder(payload) {
       });
       break;
     } catch (error) {
-      if (!isDisplayOrderReferenceUniqueConstraintError(error) || attempt === 3) {
+      if (
+        (!isDisplayOrderReferenceUniqueConstraintError(error) && !isOrderSequenceUniqueConstraintError(error))
+        || attempt === 3
+      ) {
         throw error;
       }
     }
@@ -637,7 +671,10 @@ export async function createAdminDiscountOrder(payload) {
       order = await prisma.$transaction(async (tx) => {
         const anchorSalesItem = orderLines.find((line) => line.sourceType === 'SALES_EVENT')?.salesItem
           || await ensureDiscountOrderAnchorSalesItem(tx);
-        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, anchorSalesItem.batchNumber);
+        const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, {
+          batchNumber: anchorSalesItem.batchNumber,
+          salesItemId: anchorSalesItem.id,
+        });
         const displayOrderReference = formatDisplayOrderReference({
           createdAt: orderCreatedAt,
           batchNumber: anchorSalesItem.batchNumber,
@@ -692,7 +729,10 @@ export async function createAdminDiscountOrder(payload) {
       });
       break;
     } catch (error) {
-      if (!isDisplayOrderReferenceUniqueConstraintError(error) || attempt === 3) {
+      if (
+        (!isDisplayOrderReferenceUniqueConstraintError(error) && !isOrderSequenceUniqueConstraintError(error))
+        || attempt === 3
+      ) {
         throw error;
       }
     }
