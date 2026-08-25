@@ -17,6 +17,7 @@ import { allowedFrontendOrigins, env } from './config/env.js';
 
 export const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 const webhookRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 120,

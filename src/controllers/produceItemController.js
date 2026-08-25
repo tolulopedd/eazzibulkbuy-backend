@@ -232,6 +232,7 @@ export async function viewProduceImageHandler(req, res, next) {
       res.setHeader('Content-Type', object.ContentType);
     }
     res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     return object.Body.pipe(res);
   } catch (error) {
     next(error);
