@@ -1,5 +1,6 @@
 import { prisma } from './prisma.js';
 import { DEFAULT_PICKUP_LOCATIONS } from '../services/pickupLocationService.js';
+import { DEFAULT_PRODUCE_ITEMS } from '../services/produceItemService.js';
 
 export async function ensureDatabaseCompatibility() {
   await prisma.$executeRawUnsafe(`
@@ -142,5 +143,35 @@ export async function ensureDatabaseCompatibility() {
         WHERE "name" = $1
       );
     `, location.name, location.sortOrder);
+  }
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "produce_items" (
+      "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "name" TEXT NOT NULL,
+      "image_url" TEXT NOT NULL,
+      "fallback_url" TEXT,
+      "is_active" BOOLEAN NOT NULL DEFAULT true,
+      "sort_order" INTEGER NOT NULL DEFAULT 0,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "produce_items_pkey" PRIMARY KEY ("id")
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "produce_items_name_key" ON "produce_items"("name");
+  `);
+
+  for (const item of DEFAULT_PRODUCE_ITEMS) {
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "produce_items" ("name", "image_url", "fallback_url", "is_active", "sort_order")
+      SELECT $1, $2, $3, true, $4
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM "produce_items"
+        WHERE "name" = $1
+      );
+    `, item.name, item.imageUrl, item.fallbackUrl, item.sortOrder);
   }
 }

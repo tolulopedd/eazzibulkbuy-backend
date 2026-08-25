@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { requireAdminAuth, requireAdminRoles } from '../middleware/adminAuth.js';
 import { requireTrustedOrigin } from '../middleware/security.js';
 import {
@@ -37,6 +37,14 @@ import {
   updatePickupLocationHandler,
   deletePickupLocationHandler,
 } from '../controllers/pickupLocationController.js';
+import {
+  listAdminProduceItemsHandler,
+  createProduceImageUploadHandler,
+  uploadProduceImageHandler,
+  createProduceItemHandler,
+  updateProduceItemHandler,
+  deleteProduceItemHandler,
+} from '../controllers/produceItemController.js';
 import { createUserHandler, inviteUserHandler, listUsersHandler } from '../controllers/adminUserController.js';
 
 const router = Router();
@@ -73,6 +81,17 @@ router.get('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), listAd
 router.post('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), createPickupLocationHandler);
 router.patch('/pickup-locations/:pickupLocationId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePickupLocationHandler);
 router.delete('/pickup-locations/:pickupLocationId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deletePickupLocationHandler);
+router.get('/produce-items', requireAdminRoles('ADMIN', 'SUPERADMIN'), listAdminProduceItemsHandler);
+router.post('/produce-items/upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createProduceImageUploadHandler);
+router.post(
+  '/produce-items/upload',
+  requireAdminRoles('ADMIN', 'SUPERADMIN'),
+  raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '5mb' }),
+  uploadProduceImageHandler,
+);
+router.post('/produce-items', requireAdminRoles('ADMIN', 'SUPERADMIN'), createProduceItemHandler);
+router.patch('/produce-items/:produceItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateProduceItemHandler);
+router.delete('/produce-items/:produceItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteProduceItemHandler);
 router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/preferred-pickup-location', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePreferredPickupLocationHandler);

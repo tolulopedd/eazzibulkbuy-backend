@@ -44,6 +44,25 @@ function buildObjectKey({ scopeKey, fileName, contentType }) {
     .join('/');
 }
 
+function buildProduceImageObjectKey({ fileName, contentType }) {
+  const prefix = normalizePrefix(env.s3ProducePrefix);
+  const extension = inferExtensionFromMime(contentType);
+  const baseName = sanitizeFileName(fileName).replace(/\.[a-zA-Z0-9]+$/, '') || 'produce';
+
+  return [prefix, `${Date.now()}-${baseName}.${extension}`]
+    .filter(Boolean)
+    .join('/');
+}
+
+function buildPublicObjectUrl(objectKey) {
+  const publicBaseUrl = String(env.s3PublicBaseUrl || '').replace(/\/$/, '');
+  if (publicBaseUrl) {
+    return `${publicBaseUrl}/${objectKey}`;
+  }
+
+  return `https://${env.s3BucketName}.s3.${env.s3Region}.amazonaws.com/${objectKey}`;
+}
+
 function assertS3Configured() {
   if (!s3Client) {
     throw new Error('S3 storage is not configured.');
@@ -120,6 +139,86 @@ export async function createTransferProofViewUrl(objectKey) {
     }),
     { expiresIn: DEFAULT_PRESIGNED_EXPIRY_SECONDS },
   );
+}
+
+export async function getS3Object(objectKey) {
+  assertS3Configured();
+
+  if (!objectKey) {
+    throw new Error('S3 object key is required.');
+  }
+
+  return s3Client.send(
+    new GetObjectCommand({
+      Bucket: env.s3BucketName,
+      Key: objectKey,
+    }),
+  );
+}
+
+export async function createProduceImageUploadTarget({
+  fileName,
+  contentType,
+}) {
+  assertS3Configured();
+
+  const objectKey = buildProduceImageObjectKey({
+    fileName,
+    contentType,
+  });
+
+  const uploadUrl = await getSignedUrl(
+    s3Client,
+    new PutObjectCommand({
+      Bucket: env.s3BucketName,
+      Key: objectKey,
+    }),
+    { expiresIn: DEFAULT_PRESIGNED_EXPIRY_SECONDS },
+  );
+
+  return {
+    storage: 'S3',
+    objectKey,
+    imageUrl: buildPublicObjectUrl(objectKey),
+    uploadUrl,
+    contentType,
+    expiresInSeconds: DEFAULT_PRESIGNED_EXPIRY_SECONDS,
+  };
+}
+
+export async function uploadProduceImageObject({
+  fileName,
+  contentType,
+  body,
+}) {
+  assertS3Configured();
+
+  const objectKey = buildProduceImageObjectKey({
+    fileName,
+    contentType,
+  });
+
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: env.s3BucketName,
+      Key: objectKey,
+      Body: body,
+      ContentType: contentType,
+    }),
+  );
+
+  return {
+    storage: 'S3',
+    objectKey,
+    imageUrl: buildPublicObjectUrl(objectKey),
+    contentType,
+  };
+}
+
+export function isValidProduceImageObjectKey(objectKey) {
+  const prefix = normalizePrefix(env.s3ProducePrefix);
+  const expectedStart = prefix ? `${prefix}/` : '';
+  return Boolean(objectKey) && (!expectedStart || String(objectKey).startsWith(expectedStart));
 }
 
 export function buildStoredTransferProof({

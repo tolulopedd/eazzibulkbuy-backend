@@ -41,6 +41,8 @@ export const env = {
   s3AccessKeyId: process.env.AWS_S3_ACCESS_KEY_ID || '',
   s3SecretAccessKey: process.env.AWS_S3_SECRET_ACCESS_KEY || '',
   s3ReceiptsPrefix: process.env.AWS_S3_RECEIPTS_PREFIX || 'receipts',
+  s3ProducePrefix: process.env.AWS_S3_PRODUCE_PREFIX || 'produce',
+  s3PublicBaseUrl: process.env.AWS_S3_PUBLIC_BASE_URL || '',
   smtpHost: process.env.SMTP_HOST || '',
   smtpPort: Number(process.env.SMTP_PORT || 587),
   smtpUser: process.env.SMTP_USER || '',
