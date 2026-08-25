@@ -211,6 +211,47 @@ async function reserveNextOrderSequence(tx, { batchNumber, salesItemId }) {
   };
 }
 
+function isSameCartSnapshot(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+async function findReusableIncompleteOrder(tx, {
+  userId,
+  primarySalesItemId,
+  fulfillmentMethod,
+  preferredPickupLocation,
+  subtotal,
+  deliveryFee,
+  totalAmount,
+  cartSnapshot,
+}) {
+  const candidates = await tx.order.findMany({
+    where: {
+      userId,
+      salesItemId: primarySalesItemId,
+      fulfillmentMethod,
+      preferredPickupLocation: fulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
+      subtotal,
+      serviceFee: deliveryFee,
+      totalAmount,
+      status: { in: ['PENDING_PAYMENT', 'AWAITING_MANUAL_PAYMENT'] },
+      paymentStatus: 'PENDING_PAYMENT',
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+  });
+
+  return candidates.find((candidate) => isSameCartSnapshot(parseCartNotes(candidate.notes), cartSnapshot)) || null;
+}
+
 async function ensureDiscountOrderAnchorSalesItem(tx) {
   const existing = await tx.salesItem.findFirst({
     where: { name: DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME },
@@ -409,6 +450,21 @@ export async function createPendingOrder(payload) {
               id: true,
             },
           });
+        }
+
+        const reusableOrder = await findReusableIncompleteOrder(tx, {
+          userId: user.id,
+          primarySalesItemId: primaryLine.salesItem.id,
+          fulfillmentMethod: orderFulfillmentMethod,
+          preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
+          subtotal,
+          deliveryFee,
+          totalAmount,
+          cartSnapshot,
+        });
+
+        if (reusableOrder) {
+          return reusableOrder;
         }
 
         const { orderSequence, orderCreatedAt } = await reserveNextOrderSequence(tx, {
@@ -1036,15 +1092,18 @@ export async function confirmManualTransferByReference({ orderReference, transfe
     ? order.payment.providerPayloadJson
     : {};
 
-  if (!isS3Configured) {
-    throw new Error('S3 storage is not configured for receipt uploads.');
-  }
+  let storedTransferProof = null;
+  if (transferProof) {
+    if (!isS3Configured) {
+      throw new Error('S3 storage is not configured for receipt uploads.');
+    }
 
-  if (!isValidReceiptObjectKey(orderReference, transferProof.objectKey)) {
-    throw new Error('Uploaded receipt does not match this order.');
-  }
+    if (!isValidReceiptObjectKey(orderReference, transferProof.objectKey)) {
+      throw new Error('Uploaded receipt does not match this order.');
+    }
 
-  const storedTransferProof = buildStoredTransferProof(transferProof);
+    storedTransferProof = buildStoredTransferProof(transferProof);
+  }
 
   await prisma.order.update({
     where: { orderReference },
@@ -1056,7 +1115,9 @@ export async function confirmManualTransferByReference({ orderReference, transfe
           status: 'PENDING_REVIEW',
           providerPayloadJson: {
             ...existingPayload,
-            transferProof: storedTransferProof,
+            ...(storedTransferProof ? { transferProof: storedTransferProof } : {}),
+            transferConfirmedByBuyer: true,
+            transferConfirmedAt: new Date().toISOString(),
           },
         },
       },
@@ -1065,7 +1126,7 @@ export async function confirmManualTransferByReference({ orderReference, transfe
 
   return {
     ok: true,
-    message: 'Transfer submitted successfully. We will confirm your transfer within 6 hours.',
+    message: 'Transfer confirmation received. We will confirm your payment within 6 hours.',
     orderReference: order.orderReference,
     displayOrderReference: getDisplayOrderReference(order),
     createdAt: order.createdAt,

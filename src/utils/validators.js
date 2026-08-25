@@ -89,7 +89,7 @@ export const confirmManualTransferSchema = z.object({
     contentType: z.preprocess((v) => sanitizeText(v), z.string().regex(/^image\/[a-zA-Z0-9.+-]+$/)),
     sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
     objectKey: z.preprocess((v) => sanitizeText(v), z.string().min(10).max(300)),
-  }),
+  }).optional(),
 });
 
 export const createManualTransferUploadSchema = z.object({
