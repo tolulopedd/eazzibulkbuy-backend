@@ -84,15 +84,27 @@ export async function ensureDatabaseCompatibility() {
         ADD COLUMN IF NOT EXISTS "fulfillment_method" "FulfillmentMethod" NOT NULL DEFAULT 'PICKUP';
         ALTER TABLE "orders"
         ADD COLUMN IF NOT EXISTS "fulfillment_status" "FulfillmentStatus";
-        WITH ranked_orders AS (
-          SELECT "id", ROW_NUMBER() OVER (PARTITION BY "sales_item_id" ORDER BY "created_at", "id") AS next_sequence
+        WITH existing_sequences AS (
+          SELECT
+            "sales_item_id",
+            COALESCE(MAX("order_sequence"), 0) AS max_sequence
           FROM "orders"
+          WHERE "order_sequence" IS NOT NULL
+          GROUP BY "sales_item_id"
+        ),
+        missing_sequences AS (
+          SELECT
+            o."id",
+            COALESCE(existing_sequences.max_sequence, 0)
+              + ROW_NUMBER() OVER (PARTITION BY o."sales_item_id" ORDER BY o."created_at", o."id") AS next_sequence
+          FROM "orders" AS o
+          LEFT JOIN existing_sequences ON existing_sequences."sales_item_id" = o."sales_item_id"
+          WHERE o."order_sequence" IS NULL
         )
         UPDATE "orders" AS o
-        SET "order_sequence" = ranked_orders.next_sequence
-        FROM ranked_orders
-        WHERE o."id" = ranked_orders."id"
-          AND (o."order_sequence" IS NULL OR o."order_sequence" <> ranked_orders.next_sequence);
+        SET "order_sequence" = missing_sequences.next_sequence
+        FROM missing_sequences
+        WHERE o."id" = missing_sequences."id";
         UPDATE "orders"
         SET "order_sequence" = 1
         WHERE "order_sequence" IS NULL;
