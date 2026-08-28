@@ -34,7 +34,7 @@ const PICKUP_NOTICE_INSTRUCTIONS = [
   'Please bring a valid means of identification.',
   'Your Order Number, exact name and email address used to place your order will be required for verification.',
   'If you ordered half of any item, please bring a suitable bag for proper packaging.',
-  'Kindly park only in the designated driveway/parking lot of the advised address or permitted roadside parking spots. Kindly do not obstruct neighbouring driveways or traffic.',
+  'Kindly park only in the designated driveway/parking lot of the advised address or permitted roadside parking spots. Do not obstruct neighbouring driveways or traffic.',
   'Please pick up your items and drive out of the location immediately to ease traffic and to create space for others to pick up.',
   'Do not litter the location with boxes.',
   'Please adhere strictly to the advised pick-up window, as we will not be available to attend to pickups afterwards. We will also not be responsible for any deterioration or damage to produce that is not picked up within the assigned time.',
@@ -47,7 +47,7 @@ function buildPickupInstructionsHtml(note) {
 
   return `
     <div style="margin:0 0 28px 0;">
-      <p style="margin:0 0 12px 0;">Instructions: <strong>IMPORTANT PICK-UP INSTRUCTIONS</strong></p>
+      <p style="margin:0 0 12px 0;"><strong>IMPORTANT PICK-UP INSTRUCTIONS</strong></p>
       <ol style="margin:0; padding-left:22px;">
         ${instructions}
       </ol>
@@ -58,7 +58,6 @@ function buildPickupInstructionsHtml(note) {
 
 function buildPickupInstructionsText(note) {
   return compactOptionalNoticeLines([
-    'Instructions:',
     'IMPORTANT PICK-UP INSTRUCTIONS',
     '',
     ...PICKUP_NOTICE_INSTRUCTIONS.map((instruction, index) => `${index + 1}. ${instruction}`),
