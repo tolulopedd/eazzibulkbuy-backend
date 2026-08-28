@@ -26,6 +26,47 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function compactOptionalNoticeLines(lines) {
+  return lines.filter((line) => line !== null && line !== undefined);
+}
+
+const PICKUP_NOTICE_INSTRUCTIONS = [
+  'Please bring a valid means of identification.',
+  'Your Order Number, exact name and email address used to place your order will be required for verification.',
+  'If you ordered half of any item, please bring a suitable bag for proper packaging.',
+  'Kindly park only in the designated driveway/parking lot of the advised address or permitted roadside parking spots. Kindly do not obstruct neighbouring driveways or traffic.',
+  'Please pick up your items and drive out of the location immediately to ease traffic and to create space for others to pick up.',
+  'Do not litter the location with boxes.',
+  'Please adhere strictly to the advised pick-up window, as we will not be available to attend to pickups afterwards. We will also not be responsible for any deterioration or damage to produce that is not picked up within the assigned time.',
+];
+
+function buildPickupInstructionsHtml(note) {
+  const instructions = PICKUP_NOTICE_INSTRUCTIONS
+    .map((instruction) => `<li style="margin:0 0 8px 0;">${escapeHtml(instruction)}</li>`)
+    .join('');
+
+  return `
+    <div style="margin:0 0 28px 0;">
+      <p style="margin:0 0 12px 0;">Instructions: <strong>IMPORTANT PICK-UP INSTRUCTIONS</strong></p>
+      <ol style="margin:0; padding-left:22px;">
+        ${instructions}
+      </ol>
+      ${note ? `<p style="margin:16px 0 0 0;"><strong>Additional instruction:</strong> ${escapeHtml(note)}</p>` : ''}
+    </div>
+  `;
+}
+
+function buildPickupInstructionsText(note) {
+  return compactOptionalNoticeLines([
+    'Instructions:',
+    'IMPORTANT PICK-UP INSTRUCTIONS',
+    '',
+    ...PICKUP_NOTICE_INSTRUCTIONS.map((instruction, index) => `${index + 1}. ${instruction}`),
+    note ? '' : null,
+    note ? `Additional instruction: ${note}` : null,
+  ]).join('\n');
+}
+
 async function sendWithResend({ to, subject, text, html }) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -167,26 +208,26 @@ export async function sendOrderReadyNoticeEmail({
 }) {
   const isDelivery = fulfillmentMethod === 'DELIVERY';
   const htmlLines = [
-    `<p style="margin:0 0 20px 0;">Hello ${escapeHtml(firstName)},</p>`,
-    `<p style="margin:0 0 20px 0;">${
+    `<p style="margin:0 0 28px 0;">Hello ${escapeHtml(firstName)},</p>`,
+    `<p style="margin:0 0 28px 0;">${
       isDelivery
         ? 'Your paid order is now ready for delivery coordination.'
         : 'Your paid order is now ready for pickup.'
     }</p>`,
-    `<p style="margin:0 0 20px 0;">Order reference: ${escapeHtml(displayOrderReference)}<br />Items: ${escapeHtml(itemsSummary)}</p>`,
+    `<p style="margin:0 0 28px 0;">Order reference: ${escapeHtml(displayOrderReference)}<br />Items: ${escapeHtml(itemsSummary)}</p>`,
     !isDelivery && preferredPickupLocation
-      ? `<p style="margin:0 0 20px 0;">Preferred pickup location: ${escapeHtml(preferredPickupLocation)}</p>`
+      ? `<p style="margin:0 0 28px 0;">Preferred pickup location: ${escapeHtml(preferredPickupLocation)}</p>`
       : null,
-    `<p style="margin:0 0 20px 0;">${escapeHtml(isDelivery ? 'Dispatch / meeting address' : 'Pickup address')}: ${escapeHtml(address)}<br />Date: ${escapeHtml(readyDate)}<br />Time: ${escapeHtml(timeWindow)}${
+    `<p style="margin:0 0 28px 0;">${escapeHtml(isDelivery ? 'Dispatch / meeting address' : 'Pickup address')}: ${escapeHtml(address)}<br />Date: ${escapeHtml(readyDate)}<br />Time: ${escapeHtml(timeWindow)}${
       contactName ? `<br />Contact name: ${escapeHtml(contactName)}` : ''
     }${contactPhone ? `<br />Contact phone: ${escapeHtml(contactPhone)}` : ''}</p>`,
-    note ? `<p style="margin:0 0 20px 0;">Instructions: ${escapeHtml(note)}</p>` : null,
-    `<p style="margin:0 0 20px 0;">${
+    isDelivery ? (note ? `<p style="margin:0 0 28px 0;">Instructions: ${escapeHtml(note)}</p>` : null) : buildPickupInstructionsHtml(note),
+    `<p style="margin:0 0 28px 0;">${
       isDelivery
         ? 'Please watch for further coordination from our team if needed.'
         : 'Please arrive within the stated time window to receive your order.'
     }</p>`,
-    '<p style="margin:28px 0 0 0;">Regards,<br />EazziBulkBuy.</p>',
+    '<p style="margin:0;">Regards,<br />EazziBulkBuy.</p>',
   ]
     .filter(Boolean)
     .join('');
@@ -194,7 +235,7 @@ export async function sendOrderReadyNoticeEmail({
   await sendMail({
     to: email,
     subject: isDelivery ? 'Your order is ready for delivery' : 'Your order is ready for pickup',
-    text: [
+    text: compactOptionalNoticeLines([
       `Hello ${firstName},`,
       '',
       '',
@@ -202,16 +243,19 @@ export async function sendOrderReadyNoticeEmail({
         ? 'Your paid order is now ready for delivery coordination.'
         : 'Your paid order is now ready for pickup.',
       '',
+      '',
       `Order reference: ${displayOrderReference}`,
       `Items: ${itemsSummary}`,
+      '',
       !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
+      !isDelivery && preferredPickupLocation ? '' : null,
       `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
       `Date: ${readyDate}`,
       `Time: ${timeWindow}`,
       contactName ? `Contact name: ${contactName}` : null,
       contactPhone ? `Contact phone: ${contactPhone}` : null,
-      note ? `Instructions: ${note}` : null,
       '',
+      isDelivery ? (note ? `Instructions: ${note}` : null) : buildPickupInstructionsText(note),
       '',
       isDelivery
         ? 'Please watch for further coordination from our team if needed.'
@@ -220,7 +264,7 @@ export async function sendOrderReadyNoticeEmail({
       '',
       'Regards,',
       'EazziBulkBuy.',
-    ].filter(Boolean).join('\n'),
+    ]).join('\n'),
     html: `
       <div style="font-family:Arial,Helvetica,sans-serif; color:#0f172a; font-size:16px; line-height:1.7;">
         ${htmlLines}

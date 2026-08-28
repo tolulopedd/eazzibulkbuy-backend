@@ -169,6 +169,22 @@ function formatPickupNoticeItemSummary(items = []) {
     .join(', ');
 }
 
+function compactOptionalNoticeLines(lines) {
+  return lines.filter((line) => line !== null && line !== undefined);
+}
+
+const PICKUP_NOTICE_INSTRUCTIONS = [
+  'IMPORTANT PICK-UP INSTRUCTIONS',
+  '',
+  '1. Please bring a valid means of identification.',
+  '2. Your Order Number, exact name and email address used to place your order will be required for verification.',
+  '3. If you ordered half of any item, please bring a suitable bag for proper packaging.',
+  '4. Kindly park only in the designated driveway/parking lot of the advised address or permitted roadside parking spots. Kindly do not obstruct neighbouring driveways or traffic.',
+  '5. Please pick up your items and drive out of the location immediately to ease traffic and to create space for others to pick up.',
+  '6. Do not litter the location with boxes.',
+  '7. Please adhere strictly to the advised pick-up window, as we will not be available to attend to pickups afterwards. We will also not be responsible for any deterioration or damage to produce that is not picked up within the assigned time.',
+];
+
 function buildPickupNoticeMessageText({
   firstName,
   displayOrderReference,
@@ -184,7 +200,7 @@ function buildPickupNoticeMessageText({
 }) {
   const isDelivery = fulfillmentMethod === 'DELIVERY';
 
-  return [
+  return compactOptionalNoticeLines([
     `Hello ${firstName},`,
     '',
     '',
@@ -192,20 +208,25 @@ function buildPickupNoticeMessageText({
       ? 'Your paid order is now ready for delivery coordination.'
       : 'Your paid order is now ready for pickup.',
     '',
+    '',
     `Order reference: ${displayOrderReference}`,
     `Items: ${itemsSummary}`,
+    '',
     !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
+    !isDelivery && preferredPickupLocation ? '' : null,
     `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
     `Date: ${readyDate}`,
     `Time: ${timeWindow}`,
     contactName ? `Contact name: ${contactName}` : null,
     contactPhone ? `Contact phone: ${contactPhone}` : null,
-    note ? `Instructions: ${note}` : null,
     '',
+    isDelivery
+      ? (note ? `Instructions: ${note}` : null)
+      : compactOptionalNoticeLines(['Instructions:', ...PICKUP_NOTICE_INSTRUCTIONS, note ? '' : null, note ? `Additional instruction: ${note}` : null]).join('\n'),
     '',
     'Regards,',
     'EazziBulkBuy.',
-  ].filter(Boolean).join('\n');
+  ]).join('\n');
 }
 
 function getOrderSnapshotItems(order) {
