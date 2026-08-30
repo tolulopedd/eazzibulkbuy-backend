@@ -2205,6 +2205,7 @@ export async function paymentProofViewUrlHandler(req, res, next) {
 export async function listCustomersHandler(req, res, next) {
   try {
     const query = listCustomersQuerySchema.parse(req.query);
+    const isFulfillmentStaff = req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin;
     const orderRelationFilter = query.batchNumber
       ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } }
       : {};
@@ -2252,6 +2253,21 @@ export async function listCustomersHandler(req, res, next) {
       }),
       prisma.user.count({ where }),
     ]);
+
+    if (isFulfillmentStaff) {
+      return res.json({
+        items: users.map((user) => ({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+        })),
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / query.limit)),
+      });
+    }
 
     const userIds = users.map((user) => user.id);
     const pendingUpdateRequests = await prisma.customerUpdateRequest.findMany({
@@ -2862,9 +2878,53 @@ export async function updatePreferredPickupLocationHandler(req, res, next) {
   }
 }
 
+function serializeFulfillmentOrderForPartner(order) {
+  return {
+    id: order.id,
+    orderReference: order.orderReference,
+    displayOrderReference: order.displayOrderReference,
+    orderSequence: order.orderSequence,
+    quantity: order.quantity,
+    totalAmount: order.totalAmount,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: getDisplayPaymentStatus(order),
+    status: order.status,
+    fulfillmentMethod: order.fulfillmentMethod,
+    fulfillmentStatus: order.fulfillmentStatus,
+    preferredPickupLocation: order.preferredPickupLocation,
+    unitPrice: order.unitPrice,
+    currency: order.currency,
+    subtotal: order.subtotal,
+    createdAt: order.createdAt,
+    paidAt: order.paidAt,
+    user: order.user
+      ? {
+          id: order.user.id,
+          name: order.user.name,
+          email: order.user.email,
+          phone: order.user.phone,
+          address: order.user.address,
+          city: order.user.city,
+          province: order.user.province,
+          postalCode: order.user.postalCode,
+        }
+      : null,
+    salesItem: order.salesItem
+      ? {
+          id: order.salesItem.id,
+          name: order.salesItem.name,
+          batchNumber: order.salesItem.batchNumber,
+          pickupInstructions: order.salesItem.pickupInstructions,
+        }
+      : null,
+    fulfillmentItems: order.fulfillmentItems,
+  };
+}
+
 export async function listOrdersHandler(req, res, next) {
   try {
     const query = listOrdersQuerySchema.parse(req.query);
+    const isFulfillmentStaff = req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin;
 
     const where = {
       ...(query.status ? { status: query.status } : {}),
@@ -2972,8 +3032,8 @@ export async function listOrdersHandler(req, res, next) {
         startDate: query.startDate,
         endDate: query.endDate,
       }) &&
-      (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
-      (query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
+      (isFulfillmentStaff || query.paidOnly === true ? isOrderPaidLike(order) : true) &&
+      (!isFulfillmentStaff && query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -2987,7 +3047,7 @@ export async function listOrdersHandler(req, res, next) {
     const pagedOrders = normalizedOrders.slice(skip, skip + query.limit);
 
     return res.json({
-      items: pagedOrders,
+      items: isFulfillmentStaff ? pagedOrders.map(serializeFulfillmentOrderForPartner) : pagedOrders,
       page: query.page,
       limit: query.limit,
       total,
@@ -3201,6 +3261,19 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
 
     let nextNotes = order.notes;
     let aggregateFulfillmentStatus = payload.fulfillmentStatus;
+    const isCompletedStatus = payload.fulfillmentStatus === 'PICKED_UP' || payload.fulfillmentStatus === 'DELIVERED';
+    const fulfilledAt = isCompletedStatus ? new Date().toISOString() : null;
+    const fulfillmentAudit = isCompletedStatus
+      ? {
+          fulfilledByUserId: req.admin?.userId || null,
+          fulfilledByEmail: req.admin?.email || null,
+          fulfilledByRole: req.admin?.role || null,
+        }
+      : {
+          fulfilledByUserId: null,
+          fulfilledByEmail: null,
+          fulfilledByRole: null,
+        };
 
     if (normalizedItems) {
       const nextItems = normalizedItems.map((item, index) =>
@@ -3213,9 +3286,8 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
                     ? {
                         ...child,
                         fulfillmentStatus: payload.fulfillmentStatus,
-                        fulfilledAt: payload.fulfillmentStatus === 'PICKED_UP' || payload.fulfillmentStatus === 'DELIVERED'
-                          ? new Date().toISOString()
-                          : null,
+                        fulfilledAt,
+                        ...fulfillmentAudit,
                       }
                     : child,
                 ),
@@ -3223,9 +3295,8 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
             : {
                 ...item,
                 fulfillmentStatus: payload.fulfillmentStatus,
-                fulfilledAt: payload.fulfillmentStatus === 'PICKED_UP' || payload.fulfillmentStatus === 'DELIVERED'
-                  ? new Date().toISOString()
-                  : null,
+                fulfilledAt,
+                ...fulfillmentAudit,
               }
           : item,
       );
@@ -3324,10 +3395,17 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
           ? 'Delivery confirmed successfully.'
           : 'Fulfilment status updated successfully.',
       emailSent: fulfillmentEmailSent,
-      order: {
-        ...updatedOrder,
-        fulfillmentItems,
-      },
+      order: req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin
+        ? serializeFulfillmentOrderForPartner({
+            ...updatedOrder,
+            fulfillmentStatus: deriveAggregateFulfillmentStatus(updatedOrder, fulfillmentItems),
+            displayOrderReference: getDisplayOrderReference(updatedOrder),
+            fulfillmentItems,
+          })
+        : {
+            ...updatedOrder,
+            fulfillmentItems,
+          },
     });
   } catch (error) {
     next(error);

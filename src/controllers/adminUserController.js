@@ -7,12 +7,13 @@ import { hashPassword } from '../utils/password.js';
 import { sendUserInviteEmail } from '../services/emailService.js';
 
 const userRoleSchema = z.enum(['ADMIN', 'PARTNER', 'USER']);
+const adminManagedRoleSchema = z.enum(['ADMIN', 'PARTNER']);
 
 const listUsersQuerySchema = z.object({
   q: z.string().trim().max(120).optional(),
-  role: userRoleSchema.optional(),
+  role: adminManagedRoleSchema.optional(),
   isActive: z
-    .enum(['true', 'false'])
+    .preprocess((value) => (value === '' ? undefined : value), z.enum(['true', 'false']).optional())
     .optional()
     .transform((value) => (value === undefined ? undefined : value === 'true')),
   sortBy: z.enum(['createdAt', 'lastLoginAt', 'name', 'email', 'role']).default('createdAt'),
@@ -24,7 +25,7 @@ const listUsersQuerySchema = z.object({
 const createUserSchema = z.object({
   name: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(120)),
   email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
-  role: userRoleSchema,
+  role: adminManagedRoleSchema,
   password: z.string().min(8).max(128).optional(),
   phone: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(7).max(30).optional()),
   address: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(5).max(250).optional()),
@@ -62,7 +63,7 @@ export async function listUsersHandler(req, res, next) {
     const query = listUsersQuerySchema.parse(req.query);
 
     const where = {
-      ...(query.role ? { role: query.role } : {}),
+      role: query.role || { in: ['ADMIN', 'PARTNER'] },
       ...(query.isActive !== undefined ? { isActive: query.isActive } : {}),
       ...(query.q
         ? {
@@ -103,7 +104,7 @@ export async function createUserHandler(req, res, next) {
     const payload = createUserSchema.parse(req.body);
 
     if ((payload.role === 'ADMIN' || payload.role === 'PARTNER') && !payload.password) {
-      return res.status(400).json({ message: 'Password is required for ADMIN and PARTNER accounts.' });
+      return res.status(400).json({ message: 'Password is required for admin and fulfilment staff accounts.' });
     }
 
     const existing = await prisma.user.findUnique({ where: { email: payload.email } });

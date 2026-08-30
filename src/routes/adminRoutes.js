@@ -66,7 +66,7 @@ router.patch('/sales-items/:salesItemId', requireAdminRoles('ADMIN', 'SUPERADMIN
 router.delete('/sales-items/:salesItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteSalesItemHandler);
 router.get('/reports', requireAdminRoles('ADMIN', 'SUPERADMIN'), adminReportsHandler);
 router.get('/reports/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportReportsHandler);
-router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomersHandler);
+router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), listCustomersHandler);
 router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportCustomersHandler);
 router.post('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminCustomerHandler);
 router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateCustomerHandler);
@@ -92,10 +92,10 @@ router.post(
 router.post('/produce-items', requireAdminRoles('ADMIN', 'SUPERADMIN'), createProduceItemHandler);
 router.patch('/produce-items/:produceItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateProduceItemHandler);
 router.delete('/produce-items/:produceItemId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deleteProduceItemHandler);
-router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), listOrdersHandler);
+router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), listOrdersHandler);
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/preferred-pickup-location', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePreferredPickupLocationHandler);
-router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateFulfillmentStatusHandler);
+router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), updateFulfillmentStatusHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
 router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminIncompleteOrderUploadHandler);
 router.post('/payments/:orderReference/mark-pending-review', requireAdminRoles('ADMIN', 'SUPERADMIN'), markIncompleteOrderPendingReviewHandler);

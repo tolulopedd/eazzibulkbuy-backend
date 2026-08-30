@@ -343,13 +343,15 @@ export async function sendBuyerWelcomeEmail({ email, buyerName }) {
 }
 
 export async function sendUserInviteEmail({ email, fullName, role, inviteUrl, expiresAt }) {
+  const roleLabel = role === 'PARTNER' ? 'Fulfilment Staff' : role;
+
   await sendMail({
     to: email,
-    subject: `You're invited to EazziBulkBuy (${role})`,
+    subject: `You're invited to EazziBulkBuy (${roleLabel})`,
     text: [
       `Hello ${fullName},`,
       '',
-      `You have been invited as a ${role} on EazziBulkBuy.`,
+      `You have been invited as a ${roleLabel} on EazziBulkBuy.`,
       `Use this link to set your password: ${inviteUrl}`,
       `This invite expires on: ${expiresAt.toISOString()}`,
       '',
