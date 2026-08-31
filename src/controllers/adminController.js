@@ -20,7 +20,6 @@ import {
   sendOrderRefundEmail,
   sendOrderReadyNoticeEmail,
 } from '../services/emailService.js';
-import { sendWhatsAppTextMessage } from '../services/messagingService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
@@ -563,6 +562,10 @@ function orderItemMatchesReportFilters(item, query) {
   return true;
 }
 
+function isCompletedFulfillmentItem(item) {
+  return item?.fulfillmentStatus === 'PICKED_UP' || item?.fulfillmentStatus === 'DELIVERED';
+}
+
 function sumReportItemAmounts(items) {
   const countedBundleSources = new Set();
 
@@ -944,7 +947,7 @@ const sendPickupNoticesSchema = z.object({
     orderReference: z.string().uuid(),
     itemIndex: z.number().int().min(0),
   })).min(1).max(200),
-  channels: z.array(z.enum(['EMAIL', 'WHATSAPP'])).min(1),
+  channels: z.array(z.enum(['EMAIL'])).min(1),
   address: z.string().trim().min(3).max(255),
   readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   timeWindow: z.string().trim().min(3).max(120),
@@ -1394,8 +1397,9 @@ async function buildAdminReportsData(query) {
 
     const supplierAggregation = new Map();
     for (const order of paidOrders) {
+      const supplierReportItemDetails = order.reportItemDetails.filter((item) => !isCompletedFulfillmentItem(item));
       const bundleComponentTotals = new Map();
-      for (const item of order.reportItemDetails) {
+      for (const item of supplierReportItemDetails) {
         if (!item.isBundleComponent) {
           continue;
         }
@@ -1404,7 +1408,7 @@ async function buildAdminReportsData(query) {
         bundleComponentTotals.set(groupKey, (bundleComponentTotals.get(groupKey) || 0) + item.quantity);
       }
 
-      for (const item of order.reportItemDetails) {
+      for (const item of supplierReportItemDetails) {
         if (item.isBundleComponent) {
           const supplierKey = [item.batchNumber, item.saleType, item.name].join('::');
           const current = supplierAggregation.get(supplierKey) || {
@@ -1648,7 +1652,6 @@ async function buildPickupNoticeRows(query) {
       noticeSentAt: item.pickupNotice?.sentAt || null,
       noticeChannels: item.pickupNotice?.lastResults || {},
     })))
-    .filter((row) => row.fulfillmentStatus === 'PENDING_PICKUP' || row.fulfillmentStatus === 'PENDING_DELIVERY')
     .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
     .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
     .filter((row) => !query.location || normalizePickupLocationText(row.pickupLocationFilterValue).includes(normalizePickupLocationText(query.location)))
@@ -1759,26 +1762,18 @@ export async function sendPickupNoticesHandler(req, res, next) {
         continue;
       }
 
+      if (selectedRows.some((row) => isCompletedFulfillmentItem(row))) {
+        return res.status(409).json({
+          message: 'Pickup notices cannot be sent for items already marked picked up or delivered.',
+        });
+      }
+
       const itemsSummary = formatPickupNoticeItemSummary(selectedRows);
       const firstName = order.user?.firstName || order.user?.name || 'Customer';
       const displayOrderReference = getDisplayOrderReference(order);
       const preferredPickupLocation = order.fulfillmentMethod === 'PICKUP'
         ? (selectedRows.find((row) => row.preferredPickupLocation)?.preferredPickupLocation || order.preferredPickupLocation || '')
         : '';
-      const messageText = buildPickupNoticeMessageText({
-        firstName,
-        displayOrderReference,
-        itemsSummary,
-        fulfillmentMethod: order.fulfillmentMethod,
-        address: payload.address,
-        preferredPickupLocation,
-        readyDate: payload.readyDate,
-        timeWindow: payload.timeWindow,
-        contactName: payload.contactName,
-        contactPhone: payload.contactPhone,
-        note: payload.note,
-      });
-
       const nowIso = new Date().toISOString();
       const channelResults = {};
 
@@ -1806,19 +1801,6 @@ export async function sendPickupNoticesHandler(req, res, next) {
         } else {
           channelResults.email = { status: 'skipped', sentAt: nowIso, reason: 'Buyer email is not available.' };
         }
-      }
-
-      if (payload.channels.includes('WHATSAPP')) {
-        const whatsappResult = await sendWhatsAppTextMessage({
-          to: order.user?.phone || '',
-          text: messageText,
-        });
-
-        channelResults.whatsapp = {
-          status: whatsappResult.status,
-          sentAt: nowIso,
-          reason: whatsappResult.reason || null,
-        };
       }
 
       const sentSuccessfully = Object.values(channelResults).some((result) => result?.status === 'sent');
@@ -3257,6 +3239,12 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
           ? 'Delivery orders can only be marked pending delivery or delivered.'
           : 'Pickup orders can only be marked pending pickup or picked up.',
       });
+    }
+
+    const isFulfillmentStaff = req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin;
+    const isRevertStatus = payload.fulfillmentStatus === 'PENDING_PICKUP' || payload.fulfillmentStatus === 'PENDING_DELIVERY';
+    if (isFulfillmentStaff && isRevertStatus) {
+      return res.status(403).json({ message: 'Only admin users can revert completed fulfilment actions.' });
     }
 
     let nextNotes = order.notes;
