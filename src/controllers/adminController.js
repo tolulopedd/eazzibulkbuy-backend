@@ -370,11 +370,12 @@ function orderMatchesTextQuery(order, query) {
   return haystack.some((value) => includesInsensitive(value, query));
 }
 
-function orderMatchesFulfillmentFilters(order, { fulfillmentMethod, fulfillmentStatus }) {
-  if (!fulfillmentMethod && !fulfillmentStatus) {
+function orderMatchesFulfillmentFilters(order, { fulfillmentMethod, fulfillmentStatus, pickupLocation }) {
+  if (!fulfillmentMethod && !fulfillmentStatus && !pickupLocation) {
     return true;
   }
 
+  const normalizedPickupLocation = normalizePickupLocationText(pickupLocation);
   const fulfillmentItems = normalizeFulfillmentItems(order);
   return fulfillmentItems.some((item) => {
     if (fulfillmentMethod && item.fulfillmentMethod !== fulfillmentMethod) {
@@ -382,6 +383,13 @@ function orderMatchesFulfillmentFilters(order, { fulfillmentMethod, fulfillmentS
     }
 
     if (fulfillmentStatus && item.fulfillmentStatus !== fulfillmentStatus) {
+      return false;
+    }
+
+    if (
+      normalizedPickupLocation &&
+      !normalizePickupLocationText(item.preferredPickupLocation || order.preferredPickupLocation).includes(normalizedPickupLocation)
+    ) {
       return false;
     }
 
@@ -454,7 +462,9 @@ function buildBundleFulfillmentChildren(order, item) {
 }
 
 function normalizeFulfillmentItems(order) {
-  const items = getActiveOrderSnapshotItems(order);
+  const items = getOrderSnapshotItems(order)
+    .map((item, sourceIndex) => ({ item, sourceIndex }))
+    .filter(({ item }) => !isResolvedSnapshotItem(item));
 
   if (!items.length) {
     return [
@@ -469,16 +479,20 @@ function normalizeFulfillmentItems(order) {
         fulfillmentStatusLabel: getFulfillmentStatusLabel(order.fulfillmentStatus),
         batchNumber: order.salesItem?.batchNumber || '',
         location: order.salesItem?.pickupInstructions || '',
-        preferredPickupLocation: order.preferredPickupLocation || null,
-        pickupNotice: null,
-      },
-    ];
+          preferredPickupLocation: order.preferredPickupLocation || null,
+          pickupNotice: null,
+          fulfilledAt: order.fulfilledAt || null,
+          fulfilledByUserId: null,
+          fulfilledByEmail: null,
+          fulfilledByRole: null,
+        },
+      ];
   }
 
   const flattenedItems = [];
   let itemIndex = 0;
 
-  items.forEach((item, sourceIndex) => {
+  items.forEach(({ item, sourceIndex }) => {
     const fulfillmentMethod = item.fulfillmentMethod || order.fulfillmentMethod;
     const isBundleSale = item.saleType === 'BUNDLE_DISCOUNTED_SALE';
     const bundleChildren = isBundleSale ? buildBundleFulfillmentChildren(order, item) : [];
@@ -506,6 +520,10 @@ function normalizeFulfillmentItems(order) {
           isBundleComponent: true,
           bundleName: bundleChild.parentBundleName || item.name,
           pickupNotice: bundleChild.pickupNotice || null,
+          fulfilledAt: bundleChild.fulfilledAt || null,
+          fulfilledByUserId: bundleChild.fulfilledByUserId || null,
+          fulfilledByEmail: bundleChild.fulfilledByEmail || null,
+          fulfilledByRole: bundleChild.fulfilledByRole || null,
         });
       });
       return;
@@ -531,6 +549,10 @@ function normalizeFulfillmentItems(order) {
       isBundleComponent: false,
       bundleName: null,
       pickupNotice: item.pickupNotice || null,
+      fulfilledAt: item.fulfilledAt || null,
+      fulfilledByUserId: item.fulfilledByUserId || null,
+      fulfilledByEmail: item.fulfilledByEmail || null,
+      fulfilledByRole: item.fulfilledByRole || null,
     });
   });
 
@@ -556,6 +578,13 @@ function orderItemMatchesReportFilters(item, query) {
   }
 
   if (query.fulfillmentStatus && item.fulfillmentStatus !== query.fulfillmentStatus) {
+    return false;
+  }
+
+  if (
+    query.pickupLocation &&
+    !normalizePickupLocationText(item.preferredPickupLocation).includes(normalizePickupLocationText(query.pickupLocation))
+  ) {
     return false;
   }
 
@@ -895,6 +924,7 @@ const listOrdersQuerySchema = z.object({
   endDate: z.string().datetime().optional(),
   q: z.string().trim().max(120).optional(),
   batchNumber: z.string().trim().max(120).optional(),
+  pickupLocation: z.string().trim().max(180).optional(),
   paidOnly: z
     .enum(['true', 'false'])
     .optional()
@@ -921,10 +951,11 @@ const adminReportsQuerySchema = z.object({
   endDate: z.string().datetime().optional(),
   salesItemId: z.string().uuid().optional(),
   batchNumber: z.string().trim().max(120).optional(),
+  pickupLocation: z.string().trim().max(180).optional(),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
   reportType: z
-    .enum(['orderReady', 'supplierOrders', 'salesDetails'])
+    .enum(['orderReady', 'supplierOrders', 'salesDetails', 'fulfilledOrders'])
     .default('orderReady'),
 });
 
@@ -1261,18 +1292,21 @@ async function buildAdminReportsData(query) {
       }),
     );
 
-    const salesItems = await prisma.salesItem.findMany({
-      orderBy: { name: 'asc' },
-      select: {
-        id: true,
-        name: true,
-        saleType: true,
-        batchNumber: true,
-        status: true,
-        closingDate: true,
-        pickupInstructions: true,
-      },
-    });
+    const [salesItems, pickupLocationNames] = await Promise.all([
+      prisma.salesItem.findMany({
+        orderBy: { name: 'asc' },
+        select: {
+          id: true,
+          name: true,
+          saleType: true,
+          batchNumber: true,
+          status: true,
+          closingDate: true,
+          pickupInstructions: true,
+        },
+      }),
+      getActivePickupLocationNames(),
+    ]);
 
     const [overviewOrders, overviewSalesEvents, recentCustomers] = await Promise.all([
       prisma.order.findMany({
@@ -1365,6 +1399,11 @@ async function buildAdminReportsData(query) {
         isBundleComponent: Boolean(item.isBundleComponent),
         bundleName: item.bundleName || null,
         bundleLineTotal: item.bundleLineTotal ?? null,
+        preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
+        location: item.location || order.salesItem?.pickupInstructions || '',
+        fulfilledAt: item.fulfilledAt || null,
+        fulfilledByEmail: item.fulfilledByEmail || null,
+        fulfilledByRole: item.fulfilledByRole || null,
       }));
 
       return {
@@ -1485,12 +1524,42 @@ async function buildAdminReportsData(query) {
       };
     });
 
+    const fulfilledOrderRows = paidOrders.flatMap((order) =>
+      order.reportItemDetails
+        .filter((item) => isCompletedFulfillmentItem(item))
+        .map((item) => ({
+          id: [
+            order.id,
+            item.sourceIndex ?? 'order',
+            item.bundleItemIndex ?? 'item',
+          ].join(':'),
+          orderReference: order.orderReference,
+          displayOrderReference: order.displayOrderReference,
+          batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
+          itemName: item.name,
+          quantity: item.quantity,
+          buyerName: order.user?.name || 'Unknown buyer',
+          buyerEmail: order.user?.email || '',
+          buyerPhone: order.user?.phone || '',
+          fulfillmentMethod: item.fulfillmentMethod,
+          fulfillmentStatus: item.fulfillmentStatus,
+          fulfillmentStatusLabel: item.fulfillmentStatusLabel,
+          preferredPickupLocation: item.preferredPickupLocation || '',
+          location: item.location || '',
+          fulfilledAt: item.fulfilledAt || null,
+          fulfilledByEmail: item.fulfilledByEmail || '',
+          fulfilledByRole: item.fulfilledByRole || '',
+          totalAmount: item.isBundleComponent ? (item.bundleLineTotal ?? 0) : (item.lineTotal || 0),
+        }))
+    );
+
     return {
       filters: {
         startDate: query.startDate || null,
         endDate: query.endDate || null,
         salesItemId: query.salesItemId || null,
         batchNumber: query.batchNumber || null,
+        pickupLocation: query.pickupLocation || null,
         fulfillmentMethod: query.fulfillmentMethod || null,
         fulfillmentStatus: query.fulfillmentStatus || null,
         reportType: query.reportType,
@@ -1504,6 +1573,7 @@ async function buildAdminReportsData(query) {
           status: item.status,
           closingDate: item.closingDate,
         })),
+        pickupLocations: pickupLocationNames,
       },
       summary: {
         totalOrders: normalizedOrders.length,
@@ -1542,6 +1612,7 @@ async function buildAdminReportsData(query) {
       orderReadyRows,
       supplierOrderRows,
       salesDetailRows,
+      fulfilledOrderRows,
     };
 }
 
@@ -1910,7 +1981,9 @@ export async function exportReportsHandler(req, res, next) {
         ? reports.supplierOrderRows || []
         : reportType === 'salesDetails'
           ? reports.salesDetailRows || []
-          : reports.orderReadyRows || [];
+          : reportType === 'fulfilledOrders'
+            ? reports.fulfilledOrderRows || []
+            : reports.orderReadyRows || [];
 
     const columns =
       reportType === 'supplierOrders'
@@ -1927,6 +2000,24 @@ export async function exportReportsHandler(req, res, next) {
               ['Fulfilment', (row) => row.fulfillment],
               ['Total Amount (CAD)', (row) => ((row.totalAmount || 0) / 100).toFixed(2)],
             ]
+          : reportType === 'fulfilledOrders'
+            ? [
+                ['Order No', (row) => row.displayOrderReference],
+                ['Batch No', (row) => row.batchNumber],
+                ['Item', (row) => row.itemName],
+                ['Quantity', (row) => row.quantity],
+                ['Buyer Name', (row) => row.buyerName],
+                ['Buyer Email', (row) => row.buyerEmail],
+                ['Buyer Phone', (row) => row.buyerPhone],
+                ['Fulfilment Method', (row) => row.fulfillmentMethod],
+                ['Fulfilment Status', (row) => row.fulfillmentStatusLabel],
+                ['Pickup Location', (row) => row.preferredPickupLocation],
+                ['Sales Location', (row) => row.location],
+                ['Fulfilled At', (row) => row.fulfilledAt || ''],
+                ['Fulfilled By', (row) => row.fulfilledByEmail],
+                ['Fulfilled By Role', (row) => row.fulfilledByRole],
+                ['Total Amount (CAD)', (row) => ((row.totalAmount || 0) / 100).toFixed(2)],
+              ]
           : [
               ['Order Number', (row) => row.displayOrderReference],
               ['Items', (row) => row.items],
@@ -1943,7 +2034,9 @@ export async function exportReportsHandler(req, res, next) {
         ? 'items-to-order-from-supplier-paid-report'
         : reportType === 'salesDetails'
           ? 'sales-details-report'
-          : 'order-ready-paid-report';
+          : reportType === 'fulfilledOrders'
+            ? 'fulfilled-orders-report'
+            : 'order-ready-paid-report';
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fileBase}-${new Date().toISOString().slice(0, 10)}.csv"`);
@@ -3021,6 +3114,7 @@ export async function listOrdersHandler(req, res, next) {
       orderMatchesFulfillmentFilters(order, {
         fulfillmentMethod: query.fulfillmentMethod,
         fulfillmentStatus: query.fulfillmentStatus,
+        pickupLocation: query.pickupLocation,
       }),
     );
 
@@ -3099,6 +3193,7 @@ export async function exportOrdersHandler(req, res, next) {
       orderMatchesFulfillmentFilters(order, {
         fulfillmentMethod: query.fulfillmentMethod,
         fulfillmentStatus: query.fulfillmentStatus,
+        pickupLocation: query.pickupLocation,
       }),
     );
 
