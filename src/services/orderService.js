@@ -8,6 +8,7 @@ import { retrieveStripePaymentIntent } from './paymentService.js';
 import { validateHelcimPayResponse } from './paymentService.js';
 import { sendOrderPaidEmail } from './emailService.js';
 import { formatDisplayOrderReference, getDisplayOrderReference } from '../utils/orderReference.js';
+import { APP_TIME_ZONE, getCentralDateParts } from '../utils/centralTime.js';
 import {
   buildStoredTransferProof,
   createTransferProofUploadTarget,
@@ -151,8 +152,9 @@ function normalizeBatchNumber(value) {
 function buildDisplayOrderReferencePrefix(createdAt, batchNumber) {
   const date = createdAt ? new Date(createdAt) : new Date();
   const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
-  const day = String(safeDate.getDate()).padStart(2, '0');
-  const month = safeDate.toLocaleString('en-US', { month: 'short' });
+  const centralDate = getCentralDateParts(safeDate);
+  const day = String(centralDate.day).padStart(2, '0');
+  const month = safeDate.toLocaleString('en-US', { month: 'short', timeZone: APP_TIME_ZONE });
   const normalizedBatch = normalizeBatchNumber(batchNumber);
   return normalizedBatch ? `${day}${month}-${normalizedBatch}-` : `${day}${month}-`;
 }

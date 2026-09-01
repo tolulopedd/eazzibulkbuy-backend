@@ -1,3 +1,5 @@
+import { getCentralDateParts } from './centralTime.js';
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function normalizeDate(dateValue) {
@@ -7,8 +9,9 @@ function normalizeDate(dateValue) {
 
 export function formatDisplayOrderReference({ createdAt, batchNumber, orderSequence }) {
   const safeDate = normalizeDate(createdAt);
-  const day = String(safeDate.getDate()).padStart(2, '0');
-  const month = MONTHS[safeDate.getMonth()];
+  const centralDate = getCentralDateParts(safeDate);
+  const day = String(centralDate.day).padStart(2, '0');
+  const month = MONTHS[centralDate.month - 1];
   const safeBatchNumber = String(batchNumber || '').trim().toUpperCase();
   const safeSequence = String(Math.max(1, Number(orderSequence) || 1)).padStart(4, '0');
 

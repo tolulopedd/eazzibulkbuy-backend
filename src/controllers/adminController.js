@@ -23,6 +23,7 @@ import {
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
+import { startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
 
 function getAdminResolutionAction(order) {
   return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
@@ -1355,8 +1356,8 @@ async function buildAdminReportsData(query) {
     ]);
 
     const now = new Date();
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const yearStart = startOfCentralYear(now);
+    const monthStart = startOfCentralMonth(now);
 
     const paidOverviewOrders = overviewOrders.filter((order) => isOrderPaidForOverview(order));
     const liveSalesEvents = overviewSalesEvents
