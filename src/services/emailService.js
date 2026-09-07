@@ -30,6 +30,44 @@ function compactOptionalNoticeLines(lines) {
   return lines.filter((line) => line !== null && line !== undefined);
 }
 
+function renderTemplateText(template, replacements) {
+  return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => (
+    Object.prototype.hasOwnProperty.call(replacements, key) ? replacements[key] : match
+  ));
+}
+
+function renderTextAsHtml(text) {
+  return escapeHtml(text)
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p style="margin:0 0 28px 0;">${paragraph
+      .split('\n')
+      .map((line) => (/^Pickup Address:/i.test(line) ? `<strong>${line}</strong>` : line))
+      .join('<br />')}</p>`)
+    .join('');
+}
+
+function normalizePickupNoticeBodySpacing(text) {
+  return String(text || '').replace(
+    /(Preferred pickup location:[^\n]*)(\n+)(Pickup Address:)/i,
+    '$1\n\n$3',
+  );
+}
+
+function formatNoticeDate(value) {
+  if (!value) {
+    return '';
+  }
+
+  const [year, month, day] = String(value).split('-').map(Number);
+  if (!year || !month || !day) {
+    return String(value);
+  }
+
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const paddedDay = String(day).padStart(2, '0');
+  return `${paddedDay}-${monthNames[month - 1]}-${year}`;
+}
+
 const PICKUP_NOTICE_INSTRUCTIONS = [
   'Please bring a valid means of identification.',
   'Your Order Number, exact name and email address used to place your order will be required for verification.',
@@ -204,8 +242,57 @@ export async function sendOrderReadyNoticeEmail({
   contactName,
   contactPhone,
   note,
+  emailSubject,
+  emailBody,
 }) {
   const isDelivery = fulfillmentMethod === 'DELIVERY';
+  const defaultSubject = isDelivery ? 'Your order is ready for delivery' : 'Your order is ready for pickup';
+  const defaultText = compactOptionalNoticeLines([
+    `Hello ${firstName},`,
+    '',
+    '',
+    isDelivery
+      ? 'Your paid order is now ready for delivery coordination.'
+      : 'Your paid order is now ready for pickup.',
+    '',
+    '',
+    `Order reference: ${displayOrderReference}`,
+    `Items: ${itemsSummary}`,
+    '',
+    !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
+    !isDelivery && preferredPickupLocation ? '' : null,
+    `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
+    `Date: ${readyDate}`,
+    `Time: ${timeWindow}`,
+    contactName ? `Contact name: ${contactName}` : null,
+    contactPhone ? `Contact phone: ${contactPhone}` : null,
+    '',
+    isDelivery ? (note ? `Instructions: ${note}` : null) : buildPickupInstructionsText(note),
+    '',
+    isDelivery
+      ? 'Please watch for further coordination from our team if needed.'
+      : 'Please arrive within the stated time window to receive your order.',
+    '',
+    '',
+    'Regards,',
+    'EazziBulkBuy.',
+  ]).join('\n');
+  const replacements = {
+    name: firstName,
+    orderReference: displayOrderReference,
+    items: itemsSummary,
+    preferredPickupLocation: preferredPickupLocation || '',
+    pickupAddress: address,
+    address,
+    readyDate: formatNoticeDate(readyDate),
+    date: formatNoticeDate(readyDate),
+    timeWindow,
+    time: timeWindow,
+    additionalInstructions: note || '',
+    defaultPickupInstructions: isDelivery ? (note || '') : buildPickupInstructionsText(note),
+  };
+  const subject = renderTemplateText(emailSubject || defaultSubject, replacements);
+  const customText = emailBody ? normalizePickupNoticeBodySpacing(renderTemplateText(emailBody, replacements)) : '';
   const htmlLines = [
     `<p style="margin:0 0 28px 0;">Hello ${escapeHtml(firstName)},</p>`,
     `<p style="margin:0 0 28px 0;">${
@@ -233,40 +320,11 @@ export async function sendOrderReadyNoticeEmail({
 
   await sendMail({
     to: email,
-    subject: isDelivery ? 'Your order is ready for delivery' : 'Your order is ready for pickup',
-    text: compactOptionalNoticeLines([
-      `Hello ${firstName},`,
-      '',
-      '',
-      isDelivery
-        ? 'Your paid order is now ready for delivery coordination.'
-        : 'Your paid order is now ready for pickup.',
-      '',
-      '',
-      `Order reference: ${displayOrderReference}`,
-      `Items: ${itemsSummary}`,
-      '',
-      !isDelivery && preferredPickupLocation ? `Preferred pickup location: ${preferredPickupLocation}` : null,
-      !isDelivery && preferredPickupLocation ? '' : null,
-      `${isDelivery ? 'Dispatch / meeting address' : 'Pickup address'}: ${address}`,
-      `Date: ${readyDate}`,
-      `Time: ${timeWindow}`,
-      contactName ? `Contact name: ${contactName}` : null,
-      contactPhone ? `Contact phone: ${contactPhone}` : null,
-      '',
-      isDelivery ? (note ? `Instructions: ${note}` : null) : buildPickupInstructionsText(note),
-      '',
-      isDelivery
-        ? 'Please watch for further coordination from our team if needed.'
-        : 'Please arrive within the stated time window to receive your order.',
-      '',
-      '',
-      'Regards,',
-      'EazziBulkBuy.',
-    ]).join('\n'),
+    subject,
+    text: customText || defaultText,
     html: `
       <div style="font-family:Arial,Helvetica,sans-serif; color:#0f172a; font-size:16px; line-height:1.7;">
-        ${htmlLines}
+        ${customText ? renderTextAsHtml(customText) : htmlLines}
       </div>
     `,
   });

@@ -175,6 +175,23 @@ model PickupLocation {
   @@map("pickup_locations")
 }
 
+model PickupNoticeTemplate {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  address      String
+  readyDate    String   @map("ready_date")
+  timeWindow   String   @map("time_window")
+  emailSubject String?  @map("email_subject")
+  emailBody    String?  @map("email_body")
+  instructions String?  @map("instructions")
+  isActive     Boolean  @default(true) @map("is_active")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("pickup_notice_templates")
+}
+
 model ProduceItem {
   id          String   @id @default(uuid())
   name        String   @unique

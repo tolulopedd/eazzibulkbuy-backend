@@ -38,6 +38,12 @@ import {
   deletePickupLocationHandler,
 } from '../controllers/pickupLocationController.js';
 import {
+  listPickupNoticeTemplatesHandler,
+  createPickupNoticeTemplateHandler,
+  updatePickupNoticeTemplateHandler,
+  deletePickupNoticeTemplateHandler,
+} from '../controllers/pickupNoticeTemplateController.js';
+import {
   listAdminProduceItemsHandler,
   createProduceImageUploadHandler,
   uploadProduceImageHandler,
@@ -77,6 +83,10 @@ router.post('/discount-orders/upload-url', requireAdminRoles('ADMIN', 'SUPERADMI
 router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), createDiscountOrderHandler);
 router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticesHandler);
 router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
+router.get('/pickup-notice-templates', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticeTemplatesHandler);
+router.post('/pickup-notice-templates', requireAdminRoles('ADMIN', 'SUPERADMIN'), createPickupNoticeTemplateHandler);
+router.patch('/pickup-notice-templates/:templateId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePickupNoticeTemplateHandler);
+router.delete('/pickup-notice-templates/:templateId', requireAdminRoles('ADMIN', 'SUPERADMIN'), deletePickupNoticeTemplateHandler);
 router.get('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), listAdminPickupLocationsHandler);
 router.post('/pickup-locations', requireAdminRoles('ADMIN', 'SUPERADMIN'), createPickupLocationHandler);
 router.patch('/pickup-locations/:pickupLocationId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePickupLocationHandler);

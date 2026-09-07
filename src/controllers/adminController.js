@@ -24,6 +24,7 @@ import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
 import { startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
+import { findActivePickupNoticeTemplateById } from './pickupNoticeTemplateController.js';
 
 function getAdminResolutionAction(order) {
   return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
@@ -980,12 +981,13 @@ const sendPickupNoticesSchema = z.object({
     itemIndex: z.number().int().min(0),
   })).min(1).max(200),
   channels: z.array(z.enum(['EMAIL'])).min(1),
-  address: z.string().trim().min(3).max(255),
-  readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
-  timeWindow: z.string().trim().min(3).max(120),
+  templateId: z.string().uuid().optional(),
+  address: z.string().trim().min(3).max(255).optional(),
+  readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  timeWindow: z.string().trim().min(3).max(120).optional(),
   contactName: z.string().trim().max(120).optional(),
   contactPhone: z.string().trim().max(40).optional(),
-  note: z.string().trim().max(500).optional(),
+  note: z.string().trim().max(2000).optional(),
 });
 
 const updatePreferredPickupLocationSchema = z.object({
@@ -1781,6 +1783,43 @@ export async function listPickupNoticesHandler(req, res, next) {
 export async function sendPickupNoticesHandler(req, res, next) {
   try {
     const payload = sendPickupNoticesSchema.parse(req.body);
+    let noticeTemplate = null;
+    if (payload.templateId) {
+      noticeTemplate = await findActivePickupNoticeTemplateById(payload.templateId);
+
+      if (!noticeTemplate) {
+        return res.status(404).json({ message: 'Pickup notice template not found or inactive.' });
+      }
+    }
+
+    const noticeDetails = noticeTemplate
+      ? {
+          templateId: noticeTemplate.id,
+          templateName: noticeTemplate.name,
+          address: noticeTemplate.address,
+          readyDate: noticeTemplate.readyDate,
+          timeWindow: noticeTemplate.timeWindow,
+          emailSubject: noticeTemplate.emailSubject || '',
+          emailBody: noticeTemplate.emailBody || '',
+          note: noticeTemplate.instructions || '',
+        }
+      : {
+          templateId: null,
+          templateName: '',
+          address: payload.address || '',
+          readyDate: payload.readyDate || '',
+          timeWindow: payload.timeWindow || '',
+          emailSubject: '',
+          emailBody: '',
+          note: payload.note || '',
+        };
+
+    if (!noticeDetails.address || !noticeDetails.readyDate || !noticeDetails.timeWindow) {
+      return res.status(400).json({
+        message: 'Select a pickup notice template before sending.',
+      });
+    }
+
     const orderReferences = [...new Set(payload.items.map((item) => item.orderReference))];
     const orders = await prisma.order.findMany({
       where: { orderReference: { in: orderReferences } },
@@ -1858,13 +1897,15 @@ export async function sendPickupNoticesHandler(req, res, next) {
               displayOrderReference,
               itemsSummary,
               fulfillmentMethod: order.fulfillmentMethod,
-              address: payload.address,
+              address: noticeDetails.address,
               preferredPickupLocation,
-              readyDate: payload.readyDate,
-              timeWindow: payload.timeWindow,
-              contactName: payload.contactName,
-              contactPhone: payload.contactPhone,
-              note: payload.note,
+              readyDate: noticeDetails.readyDate,
+              timeWindow: noticeDetails.timeWindow,
+              contactName: '',
+              contactPhone: '',
+              emailSubject: noticeDetails.emailSubject,
+              emailBody: noticeDetails.emailBody,
+              note: noticeDetails.note,
             });
             channelResults.email = { status: 'sent', sentAt: nowIso };
           } catch (error) {
@@ -1892,13 +1933,17 @@ export async function sendPickupNoticesHandler(req, res, next) {
               ...child,
               pickupNotice: {
                 ...previous,
-                address: payload.address,
+                templateId: noticeDetails.templateId,
+                templateName: noticeDetails.templateName,
+                address: noticeDetails.address,
                 preferredPickupLocation,
-                readyDate: payload.readyDate,
-                timeWindow: payload.timeWindow,
-                contactName: payload.contactName || '',
-                contactPhone: payload.contactPhone || '',
-                note: payload.note || '',
+                readyDate: noticeDetails.readyDate,
+                timeWindow: noticeDetails.timeWindow,
+                emailSubject: noticeDetails.emailSubject,
+                emailBody: noticeDetails.emailBody,
+                contactName: '',
+                contactPhone: '',
+                note: noticeDetails.note,
                 sentAt: sentSuccessfully ? nowIso : previous.sentAt || null,
                 lastSentAt: nowIso,
                 sendCount: Number(previous.sendCount || 0) + 1,
@@ -1923,13 +1968,17 @@ export async function sendPickupNoticesHandler(req, res, next) {
           ...item,
           pickupNotice: {
             ...previous,
-            address: payload.address,
+            templateId: noticeDetails.templateId,
+            templateName: noticeDetails.templateName,
+            address: noticeDetails.address,
             preferredPickupLocation,
-            readyDate: payload.readyDate,
-            timeWindow: payload.timeWindow,
-            contactName: payload.contactName || '',
-            contactPhone: payload.contactPhone || '',
-            note: payload.note || '',
+            readyDate: noticeDetails.readyDate,
+            timeWindow: noticeDetails.timeWindow,
+            emailSubject: noticeDetails.emailSubject,
+            emailBody: noticeDetails.emailBody,
+            contactName: '',
+            contactPhone: '',
+            note: noticeDetails.note,
             sentAt: sentSuccessfully ? nowIso : previous.sentAt || null,
             lastSentAt: nowIso,
             sendCount: Number(previous.sendCount || 0) + 1,
