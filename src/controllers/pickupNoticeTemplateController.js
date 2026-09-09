@@ -4,10 +4,12 @@ import { prisma } from '../config/prisma.js';
 
 const listPickupNoticeTemplatesQuerySchema = z.object({
   status: z.enum(['ACTIVE', 'INACTIVE', 'ALL']).default('ALL'),
+  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER']).optional(),
 });
 
 const pickupNoticeTemplatePayloadSchema = z.object({
   name: z.string().trim().min(2).max(140),
+  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER']).optional(),
   address: z.string().trim().min(3).max(255),
   readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   timeWindow: z.string().trim().min(3).max(120),
@@ -46,6 +48,7 @@ function mapPickupNoticeTemplateRow(row) {
   return {
     id: row.id,
     name: row.name,
+    templateType: row.templateType ?? row.template_type ?? 'PICKUP_NOTICE',
     address: row.address,
     readyDate: row.readyDate ?? row.ready_date,
     timeWindow: row.timeWindow ?? row.time_window,
@@ -95,6 +98,7 @@ export async function findActivePickupNoticeTemplateById(templateId) {
     SELECT
       "id",
       "name",
+      "template_type",
       "address",
       "ready_date",
       "time_window",
@@ -122,6 +126,7 @@ export async function listPickupNoticeTemplatesHandler(req, res, next) {
         SELECT
           "id",
           "name",
+          "template_type",
           "address",
           "ready_date",
           "time_window",
@@ -133,11 +138,14 @@ export async function listPickupNoticeTemplatesHandler(req, res, next) {
           "created_at",
           "updated_at"
         FROM "pickup_notice_templates"
-        WHERE ($1 = 'ALL')
+        WHERE (
+          ($1 = 'ALL')
           OR ($1 = 'ACTIVE' AND "is_active" = true)
           OR ($1 = 'INACTIVE' AND "is_active" = false)
+        )
+        AND ($2 = '' OR "template_type" = $2)
         ORDER BY "sort_order" ASC, "created_at" DESC
-      `, query.status);
+      `, query.status, query.templateType || '');
 
       return res.json({ items: rows.map(mapPickupNoticeTemplateRow) });
     }
@@ -146,6 +154,7 @@ export async function listPickupNoticeTemplatesHandler(req, res, next) {
       where: {
         ...(query.status === 'ACTIVE' ? { isActive: true } : {}),
         ...(query.status === 'INACTIVE' ? { isActive: false } : {}),
+        ...(query.templateType ? { templateType: query.templateType } : {}),
       },
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
     });
@@ -169,6 +178,7 @@ export async function createPickupNoticeTemplateHandler(req, res, next) {
     const data = {
       id: randomUUID(),
       name,
+      templateType: payload.templateType || 'PICKUP_NOTICE',
       address: payload.address.trim(),
       readyDate: payload.readyDate,
       timeWindow: payload.timeWindow.trim(),
@@ -182,6 +192,7 @@ export async function createPickupNoticeTemplateHandler(req, res, next) {
       ? await prisma.pickupNoticeTemplate.create({
           data: {
             name: data.name,
+            templateType: data.templateType,
             address: data.address,
             readyDate: data.readyDate,
             timeWindow: data.timeWindow,
@@ -196,6 +207,7 @@ export async function createPickupNoticeTemplateHandler(req, res, next) {
           INSERT INTO "pickup_notice_templates" (
             "id",
             "name",
+            "template_type",
             "address",
             "ready_date",
             "time_window",
@@ -205,10 +217,11 @@ export async function createPickupNoticeTemplateHandler(req, res, next) {
             "is_active",
             "sort_order"
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           RETURNING
             "id",
             "name",
+            "template_type",
             "address",
             "ready_date",
             "time_window",
@@ -219,7 +232,7 @@ export async function createPickupNoticeTemplateHandler(req, res, next) {
             "sort_order",
             "created_at",
             "updated_at"
-        `, data.id, data.name, data.address, data.readyDate, data.timeWindow, data.emailSubject, data.emailBody, data.instructions, data.isActive, data.sortOrder))[0]);
+        `, data.id, data.name, data.templateType, data.address, data.readyDate, data.timeWindow, data.emailSubject, data.emailBody, data.instructions, data.isActive, data.sortOrder))[0]);
 
     return res.status(201).json({
       message: 'Pickup notice template created successfully.',
@@ -240,6 +253,7 @@ export async function updatePickupNoticeTemplateHandler(req, res, next) {
           SELECT
             "id",
             "name",
+            "template_type",
             "address",
             "ready_date",
             "time_window",
@@ -273,6 +287,7 @@ export async function updatePickupNoticeTemplateHandler(req, res, next) {
           where: { id: templateId },
           data: {
             ...(payload.name !== undefined ? { name } : {}),
+            ...(payload.templateType !== undefined ? { templateType: payload.templateType } : {}),
             ...(payload.address !== undefined ? { address: payload.address.trim() } : {}),
             ...(payload.readyDate !== undefined ? { readyDate: payload.readyDate } : {}),
             ...(payload.timeWindow !== undefined ? { timeWindow: payload.timeWindow.trim() } : {}),
@@ -287,19 +302,21 @@ export async function updatePickupNoticeTemplateHandler(req, res, next) {
           UPDATE "pickup_notice_templates"
           SET
             "name" = $2,
-            "address" = $3,
-            "ready_date" = $4,
-            "time_window" = $5,
-            "email_subject" = $6,
-            "email_body" = $7,
-            "instructions" = $8,
-            "is_active" = $9,
-            "sort_order" = $10,
+            "template_type" = $3,
+            "address" = $4,
+            "ready_date" = $5,
+            "time_window" = $6,
+            "email_subject" = $7,
+            "email_body" = $8,
+            "instructions" = $9,
+            "is_active" = $10,
+            "sort_order" = $11,
             "updated_at" = CURRENT_TIMESTAMP
           WHERE "id" = $1
           RETURNING
             "id",
             "name",
+            "template_type",
             "address",
             "ready_date",
             "time_window",
@@ -313,6 +330,7 @@ export async function updatePickupNoticeTemplateHandler(req, res, next) {
         `,
         templateId,
         name,
+        payload.templateType !== undefined ? payload.templateType : existing.templateType,
         payload.address !== undefined ? payload.address.trim() : existing.address,
         payload.readyDate !== undefined ? payload.readyDate : existing.readyDate,
         payload.timeWindow !== undefined ? payload.timeWindow.trim() : existing.timeWindow,

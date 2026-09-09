@@ -41,7 +41,10 @@ function renderTextAsHtml(text) {
     .split(/\n{2,}/)
     .map((paragraph) => `<p style="margin:0 0 28px 0;">${paragraph
       .split('\n')
-      .map((line) => (/^Pickup Address:/i.test(line) ? `<strong>${line}</strong>` : line))
+      .map((line) => {
+        const formattedLine = line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        return /^Pickup Address:/i.test(line) ? `<strong>${formattedLine}</strong>` : formattedLine;
+      })
       .join('<br />')}</p>`)
     .join('');
 }

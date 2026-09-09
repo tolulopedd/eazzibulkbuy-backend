@@ -161,6 +161,7 @@ export async function ensureDatabaseCompatibility() {
     CREATE TABLE IF NOT EXISTS "pickup_notice_templates" (
       "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
       "name" TEXT NOT NULL,
+      "template_type" TEXT NOT NULL DEFAULT 'PICKUP_NOTICE',
       "address" TEXT NOT NULL,
       "ready_date" TEXT NOT NULL,
       "time_window" TEXT NOT NULL,
@@ -176,6 +177,10 @@ export async function ensureDatabaseCompatibility() {
   `);
 
   await prisma.$executeRawUnsafe(`
+    ALTER TABLE "pickup_notice_templates" ADD COLUMN IF NOT EXISTS "template_type" TEXT NOT NULL DEFAULT 'PICKUP_NOTICE';
+  `);
+
+  await prisma.$executeRawUnsafe(`
     ALTER TABLE "pickup_notice_templates" ADD COLUMN IF NOT EXISTS "email_subject" TEXT;
   `);
 
@@ -185,6 +190,11 @@ export async function ensureDatabaseCompatibility() {
 
   await prisma.$executeRawUnsafe(`
     CREATE UNIQUE INDEX IF NOT EXISTS "pickup_notice_templates_name_key" ON "pickup_notice_templates"("name");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "pickup_notice_templates_type_active_sort_idx"
+      ON "pickup_notice_templates"("template_type", "is_active", "sort_order");
   `);
 
   await prisma.$executeRawUnsafe(`

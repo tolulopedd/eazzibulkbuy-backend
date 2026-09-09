@@ -178,6 +178,7 @@ model PickupLocation {
 model PickupNoticeTemplate {
   id           String   @id @default(uuid())
   name         String   @unique
+  templateType String   @default("PICKUP_NOTICE") @map("template_type")
   address      String
   readyDate    String   @map("ready_date")
   timeWindow   String   @map("time_window")

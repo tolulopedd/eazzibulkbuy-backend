@@ -23,7 +23,7 @@ import {
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
 import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
-import { startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
+import { getCentralDateParts, startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
 import { findActivePickupNoticeTemplateById } from './pickupNoticeTemplateController.js';
 
 function getAdminResolutionAction(order) {
@@ -708,6 +708,74 @@ function buildPaidBatchSalesComparison(paidOrders) {
     }));
 }
 
+function getFulfillmentLocationName(item) {
+  const location = item.fulfillmentMethod === 'PICKUP'
+    ? item.preferredPickupLocation || item.location
+    : item.location || 'Delivery';
+
+  return String(location || '').trim() || 'Location not set';
+}
+
+function formatShortReportLocation(value) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized.split(' ').slice(0, 2).join(' ');
+}
+
+function buildFulfillmentLocationAnalytics(paidOrders) {
+  const locationMap = new Map();
+
+  for (const order of paidOrders) {
+    for (const item of order.itemDetails || []) {
+      const location = getFulfillmentLocationName(item);
+      const existing = locationMap.get(location) || {
+        location,
+        pendingOrders: new Set(),
+        fulfilledOrders: new Set(),
+        totalOrders: new Set(),
+        pendingItems: 0,
+        fulfilledItems: 0,
+        totalItems: 0,
+      };
+      const orderKey = order.displayOrderReference || order.orderReference || order.id;
+      const quantity = Number(item.quantity) || 0;
+
+      existing.totalOrders.add(orderKey);
+      existing.totalItems += quantity;
+
+      if (isCompletedFulfillmentItem(item)) {
+        existing.fulfilledOrders.add(orderKey);
+        existing.fulfilledItems += quantity;
+      } else {
+        existing.pendingOrders.add(orderKey);
+        existing.pendingItems += quantity;
+      }
+
+      locationMap.set(location, existing);
+    }
+  }
+
+  return Array.from(locationMap.values())
+    .map((entry) => ({
+      location: entry.location,
+      pendingOrders: entry.pendingOrders.size,
+      fulfilledOrders: entry.fulfilledOrders.size,
+      totalOrders: entry.totalOrders.size,
+      pendingItems: entry.pendingItems,
+      fulfilledItems: entry.fulfilledItems,
+      totalItems: entry.totalItems,
+    }))
+    .sort((a, b) => {
+      if (b.pendingOrders !== a.pendingOrders) {
+        return b.pendingOrders - a.pendingOrders;
+      }
+      return a.location.localeCompare(b.location);
+    });
+}
+
 const batchNumberSchema = z
   .string()
   .trim()
@@ -781,7 +849,7 @@ const listSalesItemsQuerySchema = z.object({
   sortBy: z.enum(['createdAt', 'closingDate', 'name', 'batchNumber', 'pricePerUnit', 'status']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  limit: z.coerce.number().int().min(1).max(500).default(20),
 });
 
 const listCustomersQuerySchema = z.object({
@@ -957,7 +1025,7 @@ const adminReportsQuerySchema = z.object({
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
   reportType: z
-    .enum(['orderReady', 'supplierOrders', 'salesDetails', 'fulfilledOrders'])
+    .enum(['orderReady', 'supplierOrders', 'salesDetails', 'fulfilledOrders', 'fulfillmentByProduct', 'allocatedPendingFulfillment'])
     .default('orderReady'),
 });
 
@@ -968,6 +1036,7 @@ const listPickupNoticesQuerySchema = z.object({
   batchNumber: z.string().trim().max(120).optional(),
   location: z.string().trim().max(255).optional(),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
+  fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
   noticeStatus: z.enum(['NOT_SENT', 'SENT']).optional(),
   sortBy: z.enum(['paidAt', 'createdAt', 'batchNumber', 'location', 'buyer']).default('paidAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
@@ -988,6 +1057,31 @@ const sendPickupNoticesSchema = z.object({
   contactName: z.string().trim().max(120).optional(),
   contactPhone: z.string().trim().max(40).optional(),
   note: z.string().trim().max(2000).optional(),
+});
+
+const previewPickupAllocationSchema = z.object({
+  availableItems: z.array(z.object({
+    name: z.string().trim().min(1).max(120),
+    batchNumber: z.string().trim().max(20).optional(),
+    quantity: z.coerce.number().int().min(1).max(100000),
+  })).min(1).max(100),
+  filters: z.object({
+    startDate: z.string().datetime().optional(),
+    endDate: z.string().datetime().optional(),
+    q: z.string().trim().max(120).optional(),
+    batchNumber: z.string().trim().max(120).optional(),
+    location: z.string().trim().max(255).optional(),
+    noticeStatus: z.enum(['NOT_SENT', 'SENT']).or(z.literal('')).optional(),
+  }).optional(),
+});
+
+const pickupAllocationPendingSummaryQuerySchema = z.object({
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  q: z.string().trim().max(120).optional(),
+  batchNumber: z.string().trim().max(120).optional(),
+  location: z.string().trim().max(255).optional(),
+  noticeStatus: z.enum(['NOT_SENT', 'SENT']).or(z.literal('')).optional(),
 });
 
 const updatePreferredPickupLocationSchema = z.object({
@@ -1404,6 +1498,7 @@ async function buildAdminReportsData(query) {
         bundleLineTotal: item.bundleLineTotal ?? null,
         preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
         location: item.location || order.salesItem?.pickupInstructions || '',
+        pickupNotice: item.pickupNotice || null,
         fulfilledAt: item.fulfilledAt || null,
         fulfilledByEmail: item.fulfilledByEmail || null,
         fulfilledByRole: item.fulfilledByRole || null,
@@ -1427,6 +1522,7 @@ async function buildAdminReportsData(query) {
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
     const dashboardPaidOrders = normalizedOrders.filter((order) => isOrderPaidForOverview(order));
     const paidBatchSalesComparison = buildPaidBatchSalesComparison(dashboardPaidOrders);
+    const fulfillmentByLocation = buildFulfillmentLocationAnalytics(dashboardPaidOrders);
 
     const orderReadyRows = paidOrders.map((order) => ({
       id: order.id,
@@ -1547,14 +1643,104 @@ async function buildAdminReportsData(query) {
           fulfillmentMethod: item.fulfillmentMethod,
           fulfillmentStatus: item.fulfillmentStatus,
           fulfillmentStatusLabel: item.fulfillmentStatusLabel,
-          preferredPickupLocation: item.preferredPickupLocation || '',
-          location: item.location || '',
+          preferredPickupLocation: formatShortReportLocation(item.preferredPickupLocation),
+          location: formatShortReportLocation(item.location),
           fulfilledAt: item.fulfilledAt || null,
           fulfilledByEmail: item.fulfilledByEmail || '',
           fulfilledByRole: item.fulfilledByRole || '',
           totalAmount: item.isBundleComponent ? (item.bundleLineTotal ?? 0) : (item.lineTotal || 0),
         }))
     );
+
+    const allocatedPendingFulfillmentRows = paidOrders.flatMap((order) =>
+      order.reportItemDetails
+        .filter((item) => item.pickupNotice?.sentAt && !isCompletedFulfillmentItem(item))
+        .map((item) => ({
+          id: [
+            order.id,
+            item.sourceIndex ?? 'order',
+            item.bundleItemIndex ?? 'item',
+            'allocated',
+          ].join(':'),
+          orderReference: order.orderReference,
+          displayOrderReference: order.displayOrderReference,
+          batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
+          itemName: item.name,
+          quantity: item.quantity,
+          buyerName: order.user?.name || 'Unknown buyer',
+          buyerEmail: order.user?.email || '',
+          buyerPhone: order.user?.phone || '',
+          fulfillmentMethod: item.fulfillmentMethod,
+          fulfillmentStatus: item.fulfillmentStatus,
+          fulfillmentStatusLabel: item.fulfillmentStatusLabel,
+          preferredPickupLocation: formatShortReportLocation(item.preferredPickupLocation),
+          pickupAddress: formatShortReportLocation(item.pickupNotice?.address),
+          readyDate: item.pickupNotice?.readyDate || '',
+          timeWindow: item.pickupNotice?.timeWindow || '',
+          noticeSentAt: item.pickupNotice?.sentAt || null,
+          templateName: item.pickupNotice?.templateName || '',
+        }))
+    );
+
+    const fulfillmentProductAggregation = new Map();
+    for (const order of paidOrders) {
+      for (const item of order.reportItemDetails) {
+        const location = getFulfillmentLocationName(item);
+        const key = [item.name, item.batchNumber, location, item.fulfillmentMethod].join('::');
+        const current = fulfillmentProductAggregation.get(key) || {
+          id: key,
+          itemName: item.name,
+          batchNumber: item.batchNumber || '',
+          location,
+          fulfillmentMethod: item.fulfillmentMethod,
+          pendingOrders: new Set(),
+          fulfilledOrders: new Set(),
+          totalOrders: new Set(),
+          pendingQuantity: 0,
+          fulfilledQuantity: 0,
+          totalQuantity: 0,
+        };
+        const orderKey = order.displayOrderReference || order.orderReference || order.id;
+        const quantity = Number(item.quantity) || 0;
+
+        current.totalOrders.add(orderKey);
+        current.totalQuantity += quantity;
+
+        if (isCompletedFulfillmentItem(item)) {
+          current.fulfilledOrders.add(orderKey);
+          current.fulfilledQuantity += quantity;
+        } else {
+          current.pendingOrders.add(orderKey);
+          current.pendingQuantity += quantity;
+        }
+
+        fulfillmentProductAggregation.set(key, current);
+      }
+    }
+
+    const fulfillmentByProductRows = Array.from(fulfillmentProductAggregation.values())
+      .map((entry) => ({
+        id: entry.id,
+        itemName: entry.itemName,
+        batchNumber: entry.batchNumber,
+        location: entry.location,
+        fulfillmentMethod: entry.fulfillmentMethod,
+        pendingOrders: entry.pendingOrders.size,
+        fulfilledOrders: entry.fulfilledOrders.size,
+        totalOrders: entry.totalOrders.size,
+        pendingQuantity: entry.pendingQuantity,
+        fulfilledQuantity: entry.fulfilledQuantity,
+        totalQuantity: entry.totalQuantity,
+      }))
+      .sort((a, b) => {
+        if (b.pendingQuantity !== a.pendingQuantity) {
+          return b.pendingQuantity - a.pendingQuantity;
+        }
+        if (a.itemName === b.itemName) {
+          return a.location.localeCompare(b.location);
+        }
+        return a.itemName.localeCompare(b.itemName);
+      });
 
     return {
       filters: {
@@ -1595,6 +1781,7 @@ async function buildAdminReportsData(query) {
           salesEventsYtd,
           salesEventsMtd,
           paidBatchSalesComparison,
+          fulfillmentByLocation,
           nextLiveEvent: nextLiveEvent
             ? {
                 name: nextLiveEvent.name,
@@ -1616,6 +1803,8 @@ async function buildAdminReportsData(query) {
       supplierOrderRows,
       salesDetailRows,
       fulfilledOrderRows,
+      allocatedPendingFulfillmentRows,
+      fulfillmentByProductRows,
     };
 }
 
@@ -1727,6 +1916,7 @@ async function buildPickupNoticeRows(query) {
       noticeChannels: item.pickupNotice?.lastResults || {},
     })))
     .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
+    .filter((row) => !query.fulfillmentStatus || row.fulfillmentStatus === query.fulfillmentStatus)
     .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
     .filter((row) => !query.location || normalizePickupLocationText(row.pickupLocationFilterValue).includes(normalizePickupLocationText(query.location)))
     .filter((row) => !query.batchNumber || parseBatchNumberFilters(query.batchNumber).some((batch) => includesInsensitive(row.batchNumber, batch)))
@@ -1774,6 +1964,251 @@ export async function listPickupNoticesHandler(req, res, next) {
       limit: query.limit,
       total: rows.length,
       totalPages: Math.max(1, Math.ceil(rows.length / query.limit)),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+function normalizeAllocationText(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function getAllocationStockKeys(row) {
+  const productName = normalizeAllocationText(row.name);
+  const batchNumber = normalizeAllocationText(row.batchNumber);
+  return [
+    `${productName}::${batchNumber}`,
+    `${productName}::`,
+  ];
+}
+
+function buildAllocationStock(availableItems) {
+  const stock = new Map();
+
+  for (const item of availableItems) {
+    const productName = normalizeAllocationText(item.name);
+    const batchNumber = normalizeAllocationText(item.batchNumber);
+    const key = `${productName}::${batchNumber}`;
+    stock.set(key, (stock.get(key) || 0) + item.quantity);
+  }
+
+  return stock;
+}
+
+function getAvailableQuantityForRow(stock, row) {
+  return getAllocationStockKeys(row).reduce((sum, key) => sum + (stock.get(key) || 0), 0);
+}
+
+function consumeAllocationStock(stock, row, quantity) {
+  let remaining = quantity;
+
+  for (const key of getAllocationStockKeys(row)) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const available = stock.get(key) || 0;
+    if (available <= 0) {
+      continue;
+    }
+
+    const consumed = Math.min(available, remaining);
+    stock.set(key, available - consumed);
+    remaining -= consumed;
+  }
+
+  return remaining === 0;
+}
+
+function getPickupAllocationCandidateSortTime(group) {
+  return new Date(group.paidAt || group.createdAt || 0).getTime();
+}
+
+function getPickupAllocationPaidDateKey(group) {
+  const sortDate = new Date(group.paidAt || group.createdAt || 0);
+  const { year, month, day } = getCentralDateParts(sortDate);
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function getPickupAllocationItemCount(group) {
+  return group.items.length;
+}
+
+function getPickupAllocationTotalQuantity(group) {
+  return group.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+}
+
+function sortPickupAllocationCandidates(left, right) {
+  const leftDateKey = getPickupAllocationPaidDateKey(left);
+  const rightDateKey = getPickupAllocationPaidDateKey(right);
+
+  if (leftDateKey !== rightDateKey) {
+    return leftDateKey.localeCompare(rightDateKey);
+  }
+
+  const itemCountDiff = getPickupAllocationItemCount(right) - getPickupAllocationItemCount(left);
+  if (itemCountDiff !== 0) {
+    return itemCountDiff;
+  }
+
+  const quantityDiff = getPickupAllocationTotalQuantity(right) - getPickupAllocationTotalQuantity(left);
+  if (quantityDiff !== 0) {
+    return quantityDiff;
+  }
+
+  return getPickupAllocationCandidateSortTime(left) - getPickupAllocationCandidateSortTime(right);
+}
+
+export async function previewPickupAllocationHandler(req, res, next) {
+  try {
+    const payload = previewPickupAllocationSchema.parse(req.body);
+    const { rows, filterOptions } = await buildPickupNoticeRows({
+      ...(payload.filters || {}),
+      fulfillmentMethod: 'PICKUP',
+      fulfillmentStatus: 'PENDING_PICKUP',
+      sortBy: 'paidAt',
+      sortOrder: 'asc',
+      page: 1,
+      limit: 200,
+    });
+    const stock = buildAllocationStock(payload.availableItems);
+    const orderGroups = new Map();
+
+    for (const row of rows) {
+      const key = row.orderReference;
+      const existing = orderGroups.get(key) || {
+        orderReference: row.orderReference,
+        displayOrderReference: row.displayOrderReference,
+        paidAt: row.paidAt,
+        createdAt: row.createdAt,
+        user: row.user,
+        preferredPickupLocation: row.preferredPickupLocation || '',
+        pickupLocation: row.pickupLocationFilterValue || row.preferredPickupLocation || row.location || '',
+        items: [],
+      };
+      existing.items.push({
+        orderReference: row.orderReference,
+        displayOrderReference: row.displayOrderReference,
+        itemIndex: row.itemIndex,
+        name: row.name,
+        batchNumber: row.batchNumber || '',
+        quantity: Number(row.quantity) || 0,
+        paidAt: row.paidAt,
+        createdAt: row.createdAt,
+        preferredPickupLocation: row.preferredPickupLocation || '',
+      });
+      orderGroups.set(key, existing);
+    }
+
+    const suggestions = [];
+    const skipped = [];
+    const candidates = Array.from(orderGroups.values()).sort(sortPickupAllocationCandidates);
+
+    for (const candidate of candidates) {
+      const shortItems = candidate.items.filter((item) => getAvailableQuantityForRow(stock, item) < item.quantity);
+
+      if (shortItems.length) {
+        skipped.push({
+          orderReference: candidate.orderReference,
+          displayOrderReference: candidate.displayOrderReference,
+          buyerName: candidate.user?.name || 'Unknown buyer',
+          buyerEmail: candidate.user?.email || '',
+          paidAt: candidate.paidAt || candidate.createdAt,
+          pickupLocation: candidate.pickupLocation,
+          items: candidate.items,
+          reason: 'Insufficient stock',
+          shortItems: shortItems.map((item) => ({
+            name: item.name,
+            batchNumber: item.batchNumber,
+            requested: item.quantity,
+            available: getAvailableQuantityForRow(stock, item),
+          })),
+        });
+        continue;
+      }
+
+      for (const item of candidate.items) {
+        consumeAllocationStock(stock, item, item.quantity);
+      }
+
+      suggestions.push({
+        orderReference: candidate.orderReference,
+        displayOrderReference: candidate.displayOrderReference,
+        buyerName: candidate.user?.name || 'Unknown buyer',
+        buyerEmail: candidate.user?.email || '',
+        buyerPhone: candidate.user?.phone || '',
+        paidAt: candidate.paidAt || candidate.createdAt,
+        pickupLocation: candidate.pickupLocation,
+        preferredPickupLocation: candidate.preferredPickupLocation,
+        items: candidate.items,
+        itemCount: candidate.items.length,
+        totalQuantity: candidate.items.reduce((sum, item) => sum + item.quantity, 0),
+      });
+    }
+
+    const remainingItems = payload.availableItems.map((item) => {
+      const name = normalizeAllocationText(item.name);
+      const batchNumber = normalizeAllocationText(item.batchNumber);
+      const key = `${name}::${batchNumber}`;
+      return {
+        name: item.name,
+        batchNumber: item.batchNumber || '',
+        inputQuantity: item.quantity,
+        remainingQuantity: stock.get(key) || 0,
+      };
+    });
+
+    return res.json({
+      suggestions,
+      skipped,
+      remainingItems,
+      filterOptions,
+      totalCandidates: candidates.length,
+      suggestedOrders: suggestions.length,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function pickupAllocationPendingSummaryHandler(req, res, next) {
+  try {
+    const query = pickupAllocationPendingSummaryQuerySchema.parse(req.query);
+    const { rows } = await buildPickupNoticeRows({
+      ...query,
+      sortBy: 'paidAt',
+      sortOrder: 'asc',
+      page: 1,
+      limit: 1,
+    });
+    const summary = new Map();
+
+    for (const row of rows) {
+      if (!['PENDING_PICKUP', 'PENDING_DELIVERY'].includes(row.fulfillmentStatus)) {
+        continue;
+      }
+
+      const key = [normalizeAllocationText(row.name), normalizeAllocationText(row.batchNumber)].join('::');
+      const current = summary.get(key) || {
+        name: row.name,
+        batchNumber: row.batchNumber || '',
+        pendingQuantity: 0,
+        pendingOrders: new Set(),
+      };
+
+      current.pendingQuantity += Number(row.quantity) || 0;
+      current.pendingOrders.add(row.orderReference);
+      summary.set(key, current);
+    }
+
+    return res.json({
+      items: Array.from(summary.values()).map((item) => ({
+        name: item.name,
+        batchNumber: item.batchNumber,
+        pendingQuantity: item.pendingQuantity,
+        pendingOrders: item.pendingOrders.size,
+      })),
     });
   } catch (error) {
     next(error);
@@ -2033,7 +2468,11 @@ export async function exportReportsHandler(req, res, next) {
           ? reports.salesDetailRows || []
           : reportType === 'fulfilledOrders'
             ? reports.fulfilledOrderRows || []
-            : reports.orderReadyRows || [];
+            : reportType === 'allocatedPendingFulfillment'
+              ? reports.allocatedPendingFulfillmentRows || []
+              : reportType === 'fulfillmentByProduct'
+                ? reports.fulfillmentByProductRows || []
+                : reports.orderReadyRows || [];
 
     const columns =
       reportType === 'supplierOrders'
@@ -2050,8 +2489,8 @@ export async function exportReportsHandler(req, res, next) {
               ['Fulfilment', (row) => row.fulfillment],
               ['Total Amount (CAD)', (row) => ((row.totalAmount || 0) / 100).toFixed(2)],
             ]
-          : reportType === 'fulfilledOrders'
-            ? [
+            : reportType === 'fulfilledOrders'
+              ? [
                 ['Order No', (row) => row.displayOrderReference],
                 ['Batch No', (row) => row.batchNumber],
                 ['Item', (row) => row.itemName],
@@ -2068,6 +2507,37 @@ export async function exportReportsHandler(req, res, next) {
                 ['Fulfilled By Role', (row) => row.fulfilledByRole],
                 ['Total Amount (CAD)', (row) => ((row.totalAmount || 0) / 100).toFixed(2)],
               ]
+            : reportType === 'allocatedPendingFulfillment'
+              ? [
+                  ['Order No', (row) => row.displayOrderReference],
+                  ['Batch No', (row) => row.batchNumber],
+                  ['Item', (row) => row.itemName],
+                  ['Qty', (row) => row.quantity],
+                  ['Buyer', (row) => row.buyerName],
+                  ['Email', (row) => row.buyerEmail],
+                  ['Phone', (row) => row.buyerPhone],
+                  ['Method', (row) => row.fulfillmentMethod],
+                  ['Status', (row) => row.fulfillmentStatusLabel],
+                  ['Pickup Location', (row) => row.preferredPickupLocation],
+                  ['Pickup Address', (row) => row.pickupAddress],
+                  ['Ready Date', (row) => row.readyDate],
+                  ['Time Window', (row) => row.timeWindow],
+                  ['Notice Sent At', (row) => row.noticeSentAt],
+                  ['Template', (row) => row.templateName],
+                ]
+              : reportType === 'fulfillmentByProduct'
+                ? [
+                  ['Product', (row) => row.itemName],
+                  ['Batch No', (row) => row.batchNumber],
+                  ['Location', (row) => row.location],
+                  ['Method', (row) => row.fulfillmentMethod],
+                  ['To be Fulfilled Orders', (row) => row.pendingOrders],
+                  ['Fulfilled Orders', (row) => row.fulfilledOrders],
+                  ['Total Orders', (row) => row.totalOrders],
+                  ['Pending Quantity', (row) => row.pendingQuantity],
+                  ['Fulfilled Quantity', (row) => row.fulfilledQuantity],
+                  ['Total Quantity', (row) => row.totalQuantity],
+                ]
           : [
               ['Order Number', (row) => row.displayOrderReference],
               ['Items', (row) => row.items],
@@ -2086,7 +2556,11 @@ export async function exportReportsHandler(req, res, next) {
           ? 'sales-details-report'
           : reportType === 'fulfilledOrders'
             ? 'fulfilled-orders-report'
-            : 'order-ready-paid-report';
+            : reportType === 'allocatedPendingFulfillment'
+              ? 'allocated-pending-fulfillment-report'
+              : reportType === 'fulfillmentByProduct'
+                ? 'fulfillment-by-product-report'
+                : 'order-ready-paid-report';
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fileBase}-${new Date().toISOString().slice(0, 10)}.csv"`);
