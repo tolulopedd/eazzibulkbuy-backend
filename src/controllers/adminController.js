@@ -716,6 +716,19 @@ function getFulfillmentLocationName(item) {
   return String(location || '').trim() || 'Location not set';
 }
 
+function getCanonicalFulfillmentLocationName(item, pickupLocationNames = []) {
+  const location = getFulfillmentLocationName(item);
+  const normalizedLocation = normalizePickupLocationText(location);
+  const matchedPickupLocation = pickupLocationNames.find((pickupLocation) => {
+    const normalizedPickupLocation = normalizePickupLocationText(pickupLocation);
+    return normalizedLocation === normalizedPickupLocation ||
+      normalizedLocation.includes(normalizedPickupLocation) ||
+      normalizedPickupLocation.includes(normalizedLocation);
+  });
+
+  return matchedPickupLocation || location;
+}
+
 function formatShortReportLocation(value) {
   const normalized = String(value || '').trim().replace(/\s+/g, ' ');
   if (!normalized) {
@@ -725,12 +738,12 @@ function formatShortReportLocation(value) {
   return normalized.split(' ').slice(0, 2).join(' ');
 }
 
-function buildFulfillmentLocationAnalytics(paidOrders) {
+function buildFulfillmentLocationAnalytics(paidOrders, pickupLocationNames = []) {
   const locationMap = new Map();
 
   for (const order of paidOrders) {
     for (const item of order.itemDetails || []) {
-      const location = getFulfillmentLocationName(item);
+      const location = getCanonicalFulfillmentLocationName(item, pickupLocationNames);
       const existing = locationMap.get(location) || {
         location,
         pendingOrders: new Set(),
@@ -1522,7 +1535,7 @@ async function buildAdminReportsData(query) {
     const paidOrders = normalizedOrders.filter((order) => isOrderPaidLike(order));
     const dashboardPaidOrders = normalizedOrders.filter((order) => isOrderPaidForOverview(order));
     const paidBatchSalesComparison = buildPaidBatchSalesComparison(dashboardPaidOrders);
-    const fulfillmentByLocation = buildFulfillmentLocationAnalytics(dashboardPaidOrders);
+    const fulfillmentByLocation = buildFulfillmentLocationAnalytics(dashboardPaidOrders, pickupLocationNames);
 
     const orderReadyRows = paidOrders.map((order) => ({
       id: order.id,
