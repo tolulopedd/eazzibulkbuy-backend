@@ -2119,9 +2119,24 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const candidates = Array.from(orderGroups.values()).sort(sortPickupAllocationCandidates);
 
     for (const candidate of candidates) {
-      const shortItems = candidate.items.filter((item) => getAvailableQuantityForRow(stock, item) < item.quantity);
+      const allocatableItems = [];
+      const shortItems = [];
 
-      if (shortItems.length) {
+      for (const item of candidate.items) {
+        const availableQuantity = getAvailableQuantityForRow(stock, item);
+        if (availableQuantity >= item.quantity) {
+          allocatableItems.push(item);
+        } else {
+          shortItems.push({
+            name: item.name,
+            batchNumber: item.batchNumber,
+            requested: item.quantity,
+            available: availableQuantity,
+          });
+        }
+      }
+
+      if (!allocatableItems.length) {
         skipped.push({
           orderReference: candidate.orderReference,
           displayOrderReference: candidate.displayOrderReference,
@@ -2131,17 +2146,12 @@ export async function previewPickupAllocationHandler(req, res, next) {
           pickupLocation: candidate.pickupLocation,
           items: candidate.items,
           reason: 'Insufficient stock',
-          shortItems: shortItems.map((item) => ({
-            name: item.name,
-            batchNumber: item.batchNumber,
-            requested: item.quantity,
-            available: getAvailableQuantityForRow(stock, item),
-          })),
+          shortItems,
         });
         continue;
       }
 
-      for (const item of candidate.items) {
+      for (const item of allocatableItems) {
         consumeAllocationStock(stock, item, item.quantity);
       }
 
@@ -2154,9 +2164,12 @@ export async function previewPickupAllocationHandler(req, res, next) {
         paidAt: candidate.paidAt || candidate.createdAt,
         pickupLocation: candidate.pickupLocation,
         preferredPickupLocation: candidate.preferredPickupLocation,
-        items: candidate.items,
-        itemCount: candidate.items.length,
-        totalQuantity: candidate.items.reduce((sum, item) => sum + item.quantity, 0),
+        items: allocatableItems,
+        skippedItems: shortItems,
+        itemCount: allocatableItems.length,
+        totalPendingItems: candidate.items.length,
+        totalQuantity: allocatableItems.reduce((sum, item) => sum + item.quantity, 0),
+        totalPendingQuantity: candidate.items.reduce((sum, item) => sum + item.quantity, 0),
       });
     }
 
