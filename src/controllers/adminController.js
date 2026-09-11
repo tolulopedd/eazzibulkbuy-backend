@@ -2109,8 +2109,6 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const payload = previewPickupAllocationSchema.parse(req.body);
     const { rows, filterOptions } = await buildPickupNoticeRows({
       ...(payload.filters || {}),
-      fulfillmentMethod: 'PICKUP',
-      fulfillmentStatus: 'PENDING_PICKUP',
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
@@ -2120,6 +2118,10 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const orderGroups = new Map();
 
     for (const row of rows) {
+      if (!['PENDING_PICKUP', 'PENDING_DELIVERY'].includes(row.fulfillmentStatus)) {
+        continue;
+      }
+
       const key = row.orderReference;
       const existing = orderGroups.get(key) || {
         orderReference: row.orderReference,
