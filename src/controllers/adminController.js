@@ -318,12 +318,28 @@ function normalizePickupLocationText(value) {
     .trim();
 }
 
+const LOCATION_NOT_SET_FILTER = '__LOCATION_NOT_SET__';
+
 function getPickupNoticeLocationValue(row) {
   if (row?.fulfillmentMethod === 'PICKUP') {
     return row.preferredPickupLocation || row.location || '';
   }
 
   return row?.location || '';
+}
+
+function pickupNoticeLocationMatchesFilter(row, location) {
+  if (!location) {
+    return true;
+  }
+
+  const rowLocation = normalizePickupLocationText(row.pickupLocationFilterValue);
+
+  if (location === LOCATION_NOT_SET_FILTER) {
+    return !rowLocation;
+  }
+
+  return rowLocation.includes(normalizePickupLocationText(location));
 }
 
 function parseBatchNumberFilters(value) {
@@ -1931,7 +1947,7 @@ async function buildPickupNoticeRows(query) {
     .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
     .filter((row) => !query.fulfillmentStatus || row.fulfillmentStatus === query.fulfillmentStatus)
     .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
-    .filter((row) => !query.location || normalizePickupLocationText(row.pickupLocationFilterValue).includes(normalizePickupLocationText(query.location)))
+    .filter((row) => pickupNoticeLocationMatchesFilter(row, query.location))
     .filter((row) => !query.batchNumber || parseBatchNumberFilters(query.batchNumber).some((batch) => includesInsensitive(row.batchNumber, batch)))
     .filter((row) => {
       if (!query.q) {
