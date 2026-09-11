@@ -328,6 +328,14 @@ function getPickupNoticeLocationValue(row) {
   return row?.location || '';
 }
 
+function getPickupNoticeLocationPresenceValue(row) {
+  if (row?.fulfillmentMethod === 'PICKUP') {
+    return row.preferredPickupLocation || '';
+  }
+
+  return row?.location || '';
+}
+
 function pickupNoticeLocationMatchesFilter(row, location) {
   if (!location) {
     return true;
@@ -336,7 +344,7 @@ function pickupNoticeLocationMatchesFilter(row, location) {
   const rowLocation = normalizePickupLocationText(row.pickupLocationFilterValue);
 
   if (location === LOCATION_NOT_SET_FILTER) {
-    return !rowLocation;
+    return !normalizePickupLocationText(getPickupNoticeLocationPresenceValue(row));
   }
 
   return rowLocation.includes(normalizePickupLocationText(location));
