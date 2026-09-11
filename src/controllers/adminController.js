@@ -2113,6 +2113,8 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const payload = previewPickupAllocationSchema.parse(req.body);
     const { rows, filterOptions } = await buildPickupNoticeRows({
       ...(payload.filters || {}),
+      fulfillmentMethod: 'PICKUP',
+      fulfillmentStatus: 'PENDING_PICKUP',
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
@@ -2123,10 +2125,6 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const orderGroups = new Map();
 
     for (const row of rows) {
-      if (!['PENDING_PICKUP', 'PENDING_DELIVERY'].includes(row.fulfillmentStatus)) {
-        continue;
-      }
-
       const key = row.orderReference;
       const existing = orderGroups.get(key) || {
         orderReference: row.orderReference,
@@ -2242,6 +2240,8 @@ export async function pickupAllocationPendingSummaryHandler(req, res, next) {
     const query = pickupAllocationPendingSummaryQuerySchema.parse(req.query);
     const { rows } = await buildPickupNoticeRows({
       ...query,
+      fulfillmentMethod: 'PICKUP',
+      fulfillmentStatus: 'PENDING_PICKUP',
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
@@ -2250,10 +2250,6 @@ export async function pickupAllocationPendingSummaryHandler(req, res, next) {
     const summary = new Map();
 
     for (const row of rows) {
-      if (!['PENDING_PICKUP', 'PENDING_DELIVERY'].includes(row.fulfillmentStatus)) {
-        continue;
-      }
-
       const key = [normalizeAllocationText(row.name), normalizeAllocationText(row.batchNumber)].join('::');
       const current = summary.get(key) || {
         name: row.name,
