@@ -336,7 +336,7 @@ function getPickupNoticeLocationPresenceValue(row) {
   return row?.location || '';
 }
 
-function pickupNoticeLocationMatchesFilter(row, location) {
+function pickupNoticeLocationMatchesFilter(row, location, activeLocations = []) {
   if (!location) {
     return true;
   }
@@ -344,7 +344,15 @@ function pickupNoticeLocationMatchesFilter(row, location) {
   const rowLocation = normalizePickupLocationText(row.pickupLocationFilterValue);
 
   if (location === LOCATION_NOT_SET_FILTER) {
-    return !normalizePickupLocationText(getPickupNoticeLocationPresenceValue(row));
+    const assignedLocation = normalizePickupLocationText(getPickupNoticeLocationPresenceValue(row));
+    if (!assignedLocation || rowLocation === 'winnipeg manitoba') {
+      return true;
+    }
+
+    return !activeLocations.some((activeLocation) => {
+      const normalizedActiveLocation = normalizePickupLocationText(activeLocation);
+      return rowLocation.includes(normalizedActiveLocation) || normalizedActiveLocation.includes(rowLocation);
+    });
   }
 
   return rowLocation.includes(normalizePickupLocationText(location));
@@ -1868,6 +1876,7 @@ function sortPickupNoticeRows(rows, query) {
 }
 
 async function buildPickupNoticeRows(query) {
+  const locations = await getActivePickupLocationNames();
   const orders = await prisma.order.findMany({
     include: {
       user: {
@@ -1955,7 +1964,7 @@ async function buildPickupNoticeRows(query) {
     .filter((row) => !query.fulfillmentMethod || row.fulfillmentMethod === query.fulfillmentMethod)
     .filter((row) => !query.fulfillmentStatus || row.fulfillmentStatus === query.fulfillmentStatus)
     .filter((row) => !query.noticeStatus || row.noticeStatus === query.noticeStatus)
-    .filter((row) => pickupNoticeLocationMatchesFilter(row, query.location))
+    .filter((row) => pickupNoticeLocationMatchesFilter(row, query.location, locations))
     .filter((row) => !query.batchNumber || parseBatchNumberFilters(query.batchNumber).some((batch) => includesInsensitive(row.batchNumber, batch)))
     .filter((row) => {
       if (!query.q) {
@@ -1977,8 +1986,6 @@ async function buildPickupNoticeRows(query) {
     });
 
   const rows = sortPickupNoticeRows(filteredRows, query);
-  const locations = await getActivePickupLocationNames();
-
   return {
     rows,
     filterOptions: {
