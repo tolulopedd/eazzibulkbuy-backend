@@ -804,18 +804,25 @@ function buildFulfillmentLocationAnalytics(paidOrders, pickupLocationNames = [])
   }
 
   return Array.from(locationMap.values())
-    .map((entry) => ({
-      location: entry.location,
-      pendingOrders: entry.pendingOrders.size,
-      fulfilledOrders: entry.fulfilledOrders.size,
-      totalOrders: entry.totalOrders.size,
-      pendingItems: entry.pendingItems,
-      fulfilledItems: entry.fulfilledItems,
-      totalItems: entry.totalItems,
-    }))
+    .map((entry) => {
+      const percentageFulfilled = entry.totalItems > 0
+        ? Number(((entry.fulfilledItems / entry.totalItems) * 100).toFixed(1))
+        : 0;
+
+      return {
+        location: entry.location,
+        pendingOrders: entry.pendingOrders.size,
+        fulfilledOrders: entry.fulfilledOrders.size,
+        totalOrders: entry.totalOrders.size,
+        pendingItems: entry.pendingItems,
+        fulfilledItems: entry.fulfilledItems,
+        totalItems: entry.totalItems,
+        percentageFulfilled,
+      };
+    })
     .sort((a, b) => {
-      if (b.pendingOrders !== a.pendingOrders) {
-        return b.pendingOrders - a.pendingOrders;
+      if (b.pendingItems !== a.pendingItems) {
+        return b.pendingItems - a.pendingItems;
       }
       return a.location.localeCompare(b.location);
     });
