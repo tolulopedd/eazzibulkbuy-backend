@@ -2044,6 +2044,10 @@ function getAvailableQuantityForRow(stock, row) {
   return getAllocationStockKeys(row).reduce((sum, key) => sum + (stock.get(key) || 0), 0);
 }
 
+function hasAllocationStockForRow(stock, row) {
+  return getAllocationStockKeys(row).some((key) => stock.has(key));
+}
+
 function consumeAllocationStock(stock, row, quantity) {
   let remaining = quantity;
 
@@ -2109,19 +2113,18 @@ export async function previewPickupAllocationHandler(req, res, next) {
     const payload = previewPickupAllocationSchema.parse(req.body);
     const { rows, filterOptions } = await buildPickupNoticeRows({
       ...(payload.filters || {}),
+      fulfillmentMethod: 'PICKUP',
+      fulfillmentStatus: 'PENDING_PICKUP',
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
       limit: 200,
     });
-    const stock = buildAllocationStock(payload.availableItems);
+    const initialStock = buildAllocationStock(payload.availableItems);
+    const stock = new Map(initialStock);
     const orderGroups = new Map();
 
     for (const row of rows) {
-      if (!['PENDING_PICKUP', 'PENDING_DELIVERY'].includes(row.fulfillmentStatus)) {
-        continue;
-      }
-
       const key = row.orderReference;
       const existing = orderGroups.get(key) || {
         orderReference: row.orderReference,
@@ -2154,8 +2157,9 @@ export async function previewPickupAllocationHandler(req, res, next) {
     for (const candidate of candidates) {
       const allocatableItems = [];
       const shortItems = [];
+      const matchingItems = candidate.items.filter((item) => hasAllocationStockForRow(initialStock, item));
 
-      for (const item of candidate.items) {
+      for (const item of matchingItems) {
         const availableQuantity = getAvailableQuantityForRow(stock, item);
         if (availableQuantity >= item.quantity) {
           allocatableItems.push(item);
