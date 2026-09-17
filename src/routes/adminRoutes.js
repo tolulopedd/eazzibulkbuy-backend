@@ -15,6 +15,7 @@ import {
   exportOrdersHandler,
   updatePreferredPickupLocationHandler,
   updateFulfillmentStatusHandler,
+  updatePartialFulfillmentHandler,
   confirmInteracPaymentHandler,
   createAdminIncompleteOrderUploadHandler,
   markIncompleteOrderPendingReviewHandler,
@@ -110,6 +111,7 @@ router.get('/orders', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), listO
 router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrdersHandler);
 router.patch('/orders/:orderReference/preferred-pickup-location', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePreferredPickupLocationHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), updateFulfillmentStatusHandler);
+router.patch('/orders/:orderReference/partial-fulfillment', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), updatePartialFulfillmentHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
 router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminIncompleteOrderUploadHandler);
 router.post('/payments/:orderReference/mark-pending-review', requireAdminRoles('ADMIN', 'SUPERADMIN'), markIncompleteOrderPendingReviewHandler);

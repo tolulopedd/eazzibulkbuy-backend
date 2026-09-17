@@ -560,6 +560,7 @@ export async function createAdminDiscountOrder(payload) {
     customerId,
     items,
     fulfillmentMethod,
+    preferredPickupLocation,
     paymentMethod = 'INTERAC_E_TRANSFER',
     discountReason,
     adminUserId,
@@ -580,6 +581,18 @@ export async function createAdminDiscountOrder(payload) {
 
   if (!user) {
     throw new Error('Selected buyer could not be found.');
+  }
+
+  const normalizedPreferredPickupLocation = preferredPickupLocation?.trim() || '';
+  if (fulfillmentMethod === 'PICKUP') {
+    if (!normalizedPreferredPickupLocation) {
+      throw new Error('Select pickup location.');
+    }
+
+    const isActivePickupLocation = await hasActivePickupLocation(normalizedPreferredPickupLocation);
+    if (!isActivePickupLocation) {
+      throw new Error('Select an active pickup location.');
+    }
   }
 
   const referencedSalesItemIds = [...new Set(items.map((item) => item.salesItemId).filter(Boolean))];
@@ -703,6 +716,7 @@ export async function createAdminDiscountOrder(payload) {
       lineTotal: line.lineTotal,
       fulfillmentMethod: line.fulfillmentMethod,
       fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+      preferredPickupLocation: line.fulfillmentMethod === 'PICKUP' ? normalizedPreferredPickupLocation : null,
       fulfillmentChildren: line.saleType === 'BUNDLE_DISCOUNTED_SALE'
         ? line.bundleItems.map((bundleItem) => ({
             name: bundleItem.name,
@@ -710,6 +724,7 @@ export async function createAdminDiscountOrder(payload) {
             lineTotal: null,
             fulfillmentMethod: line.fulfillmentMethod,
             fulfillmentStatus: getInitialFulfillmentStatus(line.fulfillmentMethod),
+            preferredPickupLocation: line.fulfillmentMethod === 'PICKUP' ? normalizedPreferredPickupLocation : null,
             parentBundleName: line.displayName,
           }))
         : [],
@@ -749,6 +764,7 @@ export async function createAdminDiscountOrder(payload) {
             quantity: orderLines.reduce((sum, line) => sum + line.quantity, 0),
             fulfillmentMethod,
             fulfillmentStatus: getInitialFulfillmentStatus(fulfillmentMethod),
+            preferredPickupLocation: fulfillmentMethod === 'PICKUP' ? normalizedPreferredPickupLocation : null,
             unitPrice: orderLines[0]?.unitPrice || 0,
             paymentMethod,
             currency: anchorSalesItem.currency || 'CAD',

@@ -564,13 +564,64 @@ function normalizeFulfillmentItems(order) {
     }
 
     const fulfillmentStatus = getDefaultItemFulfillmentStatus(order, item);
+    const baseQuantity = Number(item.quantity) || 0;
+    const partialFulfillments = getPartialFulfillments(item);
+    const partialFulfilledQuantity = fulfillmentStatus === getCompletedStatusForMethod(fulfillmentMethod)
+      ? 0
+      : Math.min(baseQuantity, getPartialFulfilledQuantity(item));
+
+    partialFulfillments.forEach((partialFulfillment, partialIndex) => {
+      const partialQuantity = Math.max(0, Number(partialFulfillment.quantity) || 0);
+      if (!partialQuantity) {
+        return;
+      }
+
+      const partialStatus = partialFulfillment.fulfillmentStatus || getCompletedStatusForMethod(fulfillmentMethod);
+      flattenedItems.push({
+        itemIndex: itemIndex++,
+        sourceIndex,
+        partialIndex,
+        salesItemId: item.salesItemId,
+        name: item.name,
+        quantity: partialQuantity,
+        originalQuantity: baseQuantity,
+        lineTotal: getProRatedLineTotal(item.lineTotal, partialQuantity, baseQuantity),
+        bundleLineTotal: null,
+        fulfillmentMethod,
+        fulfillmentStatus: partialStatus,
+        fulfillmentStatusLabel: getFulfillmentStatusLabel(partialStatus),
+        batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
+        location: item.location || order.salesItem?.pickupInstructions || '',
+        preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
+        saleType: item.saleType || null,
+        bundleItems: Array.isArray(item.bundleItems) ? item.bundleItems : [],
+        isBundleComponent: false,
+        isPartialFulfillment: true,
+        bundleName: null,
+        pickupNotice: item.pickupNotice || null,
+        fulfilledAt: partialFulfillment.fulfilledAt || null,
+        fulfilledByUserId: partialFulfillment.fulfilledByUserId || null,
+        fulfilledByEmail: partialFulfillment.fulfilledByEmail || null,
+        fulfilledByRole: partialFulfillment.fulfilledByRole || null,
+      });
+    });
+
+    const displayQuantity = fulfillmentStatus === getCompletedStatusForMethod(fulfillmentMethod)
+      ? baseQuantity
+      : Math.max(0, baseQuantity - partialFulfilledQuantity);
+
+    if (!displayQuantity) {
+      return;
+    }
+
     flattenedItems.push({
       itemIndex: itemIndex++,
       sourceIndex,
       salesItemId: item.salesItemId,
       name: item.name,
-      quantity: item.quantity,
-      lineTotal: item.lineTotal,
+      quantity: displayQuantity,
+      originalQuantity: baseQuantity,
+      lineTotal: getProRatedLineTotal(item.lineTotal, displayQuantity, baseQuantity),
       bundleLineTotal: null,
       fulfillmentMethod,
       fulfillmentStatus,
@@ -581,6 +632,7 @@ function normalizeFulfillmentItems(order) {
       saleType: item.saleType || null,
       bundleItems: Array.isArray(item.bundleItems) ? item.bundleItems : [],
       isBundleComponent: false,
+      isPartialFulfillment: false,
       bundleName: null,
       pickupNotice: item.pickupNotice || null,
       fulfilledAt: item.fulfilledAt || null,
@@ -627,6 +679,34 @@ function orderItemMatchesReportFilters(item, query) {
 
 function isCompletedFulfillmentItem(item) {
   return item?.fulfillmentStatus === 'PICKED_UP' || item?.fulfillmentStatus === 'DELIVERED';
+}
+
+function getCompletedStatusForMethod(fulfillmentMethod) {
+  return fulfillmentMethod === 'DELIVERY' ? 'DELIVERED' : 'PICKED_UP';
+}
+
+function getPendingStatusForMethod(fulfillmentMethod) {
+  return fulfillmentMethod === 'DELIVERY' ? 'PENDING_DELIVERY' : 'PENDING_PICKUP';
+}
+
+function getPartialFulfillments(item) {
+  return Array.isArray(item?.partialFulfillments) ? item.partialFulfillments : [];
+}
+
+function getPartialFulfilledQuantity(item) {
+  return getPartialFulfillments(item).reduce((sum, entry) => sum + Math.max(0, Number(entry?.quantity) || 0), 0);
+}
+
+function getProRatedLineTotal(lineTotal, quantity, totalQuantity) {
+  const baseLineTotal = Number(lineTotal) || 0;
+  const baseQuantity = Number(totalQuantity) || 0;
+  const rowQuantity = Number(quantity) || 0;
+
+  if (!baseLineTotal || !baseQuantity || !rowQuantity) {
+    return baseLineTotal;
+  }
+
+  return Math.round((baseLineTotal * rowQuantity) / baseQuantity);
 }
 
 function sumReportItemAmounts(items) {
@@ -971,6 +1051,7 @@ const createDiscountOrderSchema = z.object({
   customerId: z.string().uuid(),
   items: z.array(discountOrderItemSchema).min(1).max(25),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).default('PICKUP'),
+  preferredPickupLocation: z.string().trim().max(180).optional(),
   paymentMethod: z.enum(['INTERAC_E_TRANSFER']).default('INTERAC_E_TRANSFER'),
   discountReason: z.string().trim().min(3).max(240),
   adminComment: z.string().trim().max(500).optional(),
@@ -987,6 +1068,14 @@ const createDiscountOrderSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['fulfillmentMethod'],
       message: 'Custom discount items currently support pickup only.',
+    });
+  }
+
+  if (payload.fulfillmentMethod === 'PICKUP' && !payload.preferredPickupLocation) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['preferredPickupLocation'],
+      message: 'Select pickup location.',
     });
   }
 
@@ -1138,6 +1227,11 @@ const pickupAllocationPendingSummaryQuerySchema = z.object({
 
 const updatePreferredPickupLocationSchema = z.object({
   preferredPickupLocation: z.string().trim().min(2).max(180),
+});
+
+const partialFulfillmentSchema = z.object({
+  itemIndex: z.number().int().min(0),
+  quantity: z.coerce.number().int().min(1).max(100000),
 });
 
 async function findConflictingActiveBatchNumber(batchNumber, excludeSalesItemId) {
@@ -4070,6 +4164,184 @@ export async function updateFulfillmentStatusHandler(req, res, next) {
           ? 'Delivery confirmed successfully.'
           : 'Fulfilment status updated successfully.',
       emailSent: fulfillmentEmailSent,
+      order: req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin
+        ? serializeFulfillmentOrderForPartner({
+            ...updatedOrder,
+            fulfillmentStatus: deriveAggregateFulfillmentStatus(updatedOrder, fulfillmentItems),
+            displayOrderReference: getDisplayOrderReference(updatedOrder),
+            fulfillmentItems,
+          })
+        : {
+            ...updatedOrder,
+            fulfillmentItems,
+          },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updatePartialFulfillmentHandler(req, res, next) {
+  try {
+    const orderReference = z.string().uuid().parse(req.params.orderReference);
+    const payload = partialFulfillmentSchema.parse(req.body);
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (!isOrderPaidLike(order)) {
+      return res.status(409).json({ message: 'Only paid orders can be updated for pickup or delivery.' });
+    }
+
+    const snapshot = parseOrderNotes(order.notes);
+    const rawItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
+
+    if (!rawItems.length) {
+      return res.status(409).json({ message: 'Partial fulfilment requires item details.' });
+    }
+
+    const normalizedItems = rawItems.map((item) => {
+      const normalizedItem = {
+        ...item,
+        fulfillmentMethod: item.fulfillmentMethod || order.fulfillmentMethod,
+        fulfillmentStatus: getDefaultItemFulfillmentStatus(order, item),
+      };
+
+      if (normalizedItem.saleType === 'BUNDLE_DISCOUNTED_SALE') {
+        normalizedItem.fulfillmentChildren = buildBundleFulfillmentChildren(order, normalizedItem);
+      }
+
+      return normalizedItem;
+    });
+
+    const flattenedItems = normalizeFulfillmentItems({
+      ...order,
+      notes: JSON.stringify({
+        ...(snapshot || {}),
+        items: normalizedItems,
+      }),
+    });
+    const targetItem = flattenedItems.find((item) => item.itemIndex === payload.itemIndex);
+
+    if (!targetItem) {
+      return res.status(404).json({ message: 'Order item not found.' });
+    }
+
+    if (targetItem.isBundleComponent || targetItem.isPartialFulfillment) {
+      return res.status(409).json({ message: 'Select a pending order item.' });
+    }
+
+    if (isCompletedFulfillmentItem(targetItem)) {
+      return res.status(409).json({ message: 'This item is already completed.' });
+    }
+
+    const sourceItem = normalizedItems[targetItem.sourceIndex];
+    const originalQuantity = Number(sourceItem?.quantity) || 0;
+    const alreadyFulfilledQuantity = getPartialFulfilledQuantity(sourceItem);
+    const remainingQuantity = Math.max(0, originalQuantity - alreadyFulfilledQuantity);
+
+    if (!remainingQuantity) {
+      return res.status(409).json({ message: 'This item is already completed.' });
+    }
+
+    if (payload.quantity > remainingQuantity) {
+      return res.status(409).json({ message: `Quantity cannot exceed ${remainingQuantity}.` });
+    }
+
+    const completedStatus = getCompletedStatusForMethod(targetItem.fulfillmentMethod);
+    const fulfilledAt = new Date().toISOString();
+    const fulfillmentAudit = {
+      fulfilledByUserId: req.admin?.userId || null,
+      fulfilledByEmail: req.admin?.email || null,
+      fulfilledByRole: req.admin?.role || null,
+    };
+    const nextPartialFulfillments = [
+      ...getPartialFulfillments(sourceItem),
+      {
+        quantity: payload.quantity,
+        fulfillmentStatus: completedStatus,
+        fulfilledAt,
+        ...fulfillmentAudit,
+      },
+    ];
+    const nextPartialTotal = alreadyFulfilledQuantity + payload.quantity;
+
+    const nextItems = normalizedItems.map((item, index) => {
+      if (index !== targetItem.sourceIndex) {
+        return item;
+      }
+
+      return {
+        ...item,
+        fulfillmentStatus: nextPartialTotal >= originalQuantity
+          ? completedStatus
+          : getPendingStatusForMethod(targetItem.fulfillmentMethod),
+        fulfilledAt: nextPartialTotal >= originalQuantity ? fulfilledAt : item.fulfilledAt || null,
+        ...(nextPartialTotal >= originalQuantity ? fulfillmentAudit : {}),
+        partialFulfillments: nextPartialFulfillments,
+      };
+    });
+
+    const nextNotes = JSON.stringify({
+      ...(snapshot || {}),
+      items: nextItems,
+    });
+    const nextFlattenedItems = normalizeFulfillmentItems({
+      ...order,
+      notes: nextNotes,
+    });
+    const aggregateFulfillmentStatus = deriveAggregateFulfillmentStatus(order, nextFlattenedItems);
+
+    const updatedOrder = await prisma.order.update({
+      where: { orderReference },
+      data: {
+        fulfillmentStatus: aggregateFulfillmentStatus,
+        notes: nextNotes,
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            providerReference: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    const fulfillmentItems = normalizeFulfillmentItems(updatedOrder);
+
+    return res.json({
+      message: 'Partial fulfilment saved successfully.',
       order: req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin
         ? serializeFulfillmentOrderForPartner({
             ...updatedOrder,
