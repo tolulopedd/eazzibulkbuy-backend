@@ -298,10 +298,14 @@ export async function ensureDatabaseCompatibility() {
     CREATE UNIQUE INDEX IF NOT EXISTS "produce_items_name_key" ON "produce_items"("name");
   `);
 
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "produce_items" ALTER COLUMN "id" SET DEFAULT gen_random_uuid()::text;
+  `);
+
   for (const item of DEFAULT_PRODUCE_ITEMS) {
     await prisma.$executeRawUnsafe(`
-      INSERT INTO "produce_items" ("name", "image_url", "fallback_url", "is_active", "sort_order")
-      SELECT $1, $2, $3, true, $4
+      INSERT INTO "produce_items" ("id", "name", "image_url", "fallback_url", "is_active", "sort_order")
+      SELECT gen_random_uuid()::text, $1, $2, $3, true, $4
       WHERE NOT EXISTS (
         SELECT 1
         FROM "produce_items"
