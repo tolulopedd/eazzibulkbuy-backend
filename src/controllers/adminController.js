@@ -18,13 +18,15 @@ import {
   sendOrderFulfillmentCompletedEmail,
   sendOrderCancellationEmail,
   sendOrderRefundEmail,
+  sendOrderStoreCreditEmail,
   sendOrderReadyNoticeEmail,
 } from '../services/emailService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
-import { getActivePickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
+import { getActivePickupLocationNames, getAllPickupLocationNames, hasActivePickupLocation } from '../services/pickupLocationService.js';
 import { getCentralDateParts, startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
 import { findActivePickupNoticeTemplateById } from './pickupNoticeTemplateController.js';
+import { issueStoreCredit } from '../services/storeCreditService.js';
 
 function getAdminResolutionAction(order) {
   return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
@@ -32,7 +34,7 @@ function getAdminResolutionAction(order) {
 
 function isOrderResolvedAwayFromPaid(order) {
   const action = getAdminResolutionAction(order);
-  return action === 'CANCELLED' || action === 'REFUNDED';
+  return action === 'CANCELLED' || action === 'REFUNDED' || action === 'STORE_CREDIT';
 }
 
 function isOrderPaidLike(order) {
@@ -94,7 +96,7 @@ function getFulfillmentStatusLabel(status) {
 
 function getDisplayPaymentStatus(order) {
   const resolutionAction = order?.payment?.providerPayloadJson?.adminResolution?.action;
-  if (resolutionAction === 'REFUNDED' || resolutionAction === 'CANCELLED') {
+  if (resolutionAction === 'REFUNDED' || resolutionAction === 'CANCELLED' || resolutionAction === 'STORE_CREDIT') {
     return resolutionAction;
   }
 
@@ -102,12 +104,16 @@ function getDisplayPaymentStatus(order) {
   if (resolvedItems.length) {
     const hasRefunded = resolvedItems.some((item) => item.paymentResolution?.action === 'REFUNDED');
     const hasCancelled = resolvedItems.some((item) => item.paymentResolution?.action === 'CANCELLED');
+    const hasStoreCredit = resolvedItems.some((item) => item.paymentResolution?.action === 'STORE_CREDIT');
 
-    if (hasRefunded && hasCancelled) {
+    if ([hasRefunded, hasCancelled, hasStoreCredit].filter(Boolean).length > 1) {
       return 'PARTIALLY_RESOLVED';
     }
     if (hasRefunded) {
       return 'PARTIALLY_REFUNDED';
+    }
+    if (hasStoreCredit) {
+      return 'PARTIALLY_STORE_CREDIT';
     }
     if (hasCancelled) {
       return 'PARTIALLY_CANCELLED';
@@ -129,7 +135,7 @@ function getDisplayPaymentStatus(order) {
 
 function isResolvedSnapshotItem(item) {
   const action = item?.paymentResolution?.action;
-  return action === 'CANCELLED' || action === 'REFUNDED';
+  return action === 'CANCELLED' || action === 'REFUNDED' || action === 'STORE_CREDIT';
 }
 
 function parseOrderNotes(notes) {
@@ -1119,12 +1125,12 @@ const adminIncompleteOrderReviewSchema = z.object({
     contentType: z.string().trim().regex(/^image\/[a-zA-Z0-9.+-]+$/),
     sizeBytes: z.number().int().positive().max(5 * 1024 * 1024),
     objectKey: z.string().trim().min(10).max(300),
-  }),
+  }).optional(),
 });
 
 const adminPaymentResolutionSchema = z.object({
   orderReference: z.string().uuid(),
-  action: z.enum(['CANCELLED', 'REFUNDED']),
+  action: z.enum(['CANCELLED', 'REFUNDED', 'STORE_CREDIT']),
   comment: z.string().trim().min(3).max(500),
   notifyBuyer: z.boolean().default(false),
   sourceIndexes: z.array(z.number().int().min(0)).min(1).max(50),
@@ -1144,7 +1150,7 @@ const listOrdersQuerySchema = z.object({
     .enum(['PENDING_PAYMENT', 'AWAITING_MANUAL_PAYMENT', 'PAID', 'CONFIRMED', 'CANCELLED'])
     .optional(),
   paymentStatus: z
-    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'])
+    .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'])
     .optional(),
   paymentMethod: z
     .enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY'])
@@ -1548,7 +1554,7 @@ async function buildAdminReportsData(query) {
           pickupInstructions: true,
         },
       }),
-      getActivePickupLocationNames(),
+      getAllPickupLocationNames(),
     ]);
 
     const [overviewOrders, overviewSalesEvents, recentCustomers] = await Promise.all([
@@ -1629,6 +1635,7 @@ async function buildAdminReportsData(query) {
       const itemDetails = fulfillmentItems.map((item) => ({
         salesItemId: item.salesItemId || order.salesItemId,
         sourceIndex: item.sourceIndex ?? null,
+        partialIndex: item.partialIndex ?? null,
         bundleItemIndex: item.bundleItemIndex ?? null,
         name: item.name,
         quantity: item.quantity,
@@ -1640,6 +1647,7 @@ async function buildAdminReportsData(query) {
         saleType: item.saleType || order.salesItem?.saleType || 'NORMAL_SALE',
         bundleItems: Array.isArray(item.bundleItems) ? item.bundleItems : [],
         isBundleComponent: Boolean(item.isBundleComponent),
+        isPartialFulfillment: Boolean(item.isPartialFulfillment),
         bundleName: item.bundleName || null,
         bundleLineTotal: item.bundleLineTotal ?? null,
         preferredPickupLocation: item.preferredPickupLocation || order.preferredPickupLocation || null,
@@ -1776,6 +1784,7 @@ async function buildAdminReportsData(query) {
           id: [
             order.id,
             item.sourceIndex ?? 'order',
+            item.partialIndex ?? 'partial',
             item.bundleItemIndex ?? 'item',
           ].join(':'),
           orderReference: order.orderReference,
@@ -1977,7 +1986,7 @@ function sortPickupNoticeRows(rows, query) {
 }
 
 async function buildPickupNoticeRows(query) {
-  const locations = await getActivePickupLocationNames();
+  const locations = await getAllPickupLocationNames();
   const orders = await prisma.order.findMany({
     include: {
       user: {
@@ -2848,59 +2857,76 @@ export async function resolvePaymentHandler(req, res, next) {
       delete nextProviderPayload.adminResolution;
     }
 
-    const updatedOrder = await prisma.order.update({
-      where: { orderReference: payload.orderReference },
-      data: {
-        quantity: remainingQuantity,
-        subtotal: remainingSubtotal,
-        serviceFee: nextServiceFee,
-        totalAmount: nextTotalAmount,
-        notes: JSON.stringify({
-          ...(snapshot && typeof snapshot === 'object' ? snapshot : {}),
-          items: nextSnapshotItems,
-        }),
-        status: remainingSnapshotItems.length === 0 ? 'CANCELLED' : order.status,
-        paymentStatus: remainingSnapshotItems.length === 0 ? 'FAILED' : order.paymentStatus,
-        payment: {
-          update: {
-            status: remainingSnapshotItems.length === 0 ? 'FAILED' : order.payment?.status || order.paymentStatus,
-            providerPayloadJson: nextProviderPayload,
+    const nextAmountDue = isPaid ? 0 : Math.max(0, nextTotalAmount - (order.storeCreditApplied || 0));
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { orderReference: payload.orderReference },
+        data: {
+          quantity: remainingQuantity,
+          subtotal: remainingSubtotal,
+          serviceFee: nextServiceFee,
+          totalAmount: nextTotalAmount,
+          amountDue: nextAmountDue,
+          notes: JSON.stringify({
+            ...(snapshot && typeof snapshot === 'object' ? snapshot : {}),
+            items: nextSnapshotItems,
+          }),
+          status: remainingSnapshotItems.length === 0 ? 'CANCELLED' : order.status,
+          paymentStatus: remainingSnapshotItems.length === 0 ? 'FAILED' : order.paymentStatus,
+          payment: {
+            update: {
+              status: remainingSnapshotItems.length === 0 ? 'FAILED' : order.payment?.status || order.paymentStatus,
+              providerPayloadJson: nextProviderPayload,
+            },
           },
         },
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            title: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-            address: true,
-            city: true,
-            province: true,
-            postalCode: true,
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              title: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              address: true,
+              city: true,
+              province: true,
+              postalCode: true,
+            },
+          },
+          salesItem: {
+            select: {
+              id: true,
+              name: true,
+              batchNumber: true,
+              pickupInstructions: true,
+            },
+          },
+          payment: {
+            select: {
+              status: true,
+              providerPayloadJson: true,
+              providerReference: true,
+              updatedAt: true,
+            },
           },
         },
-        salesItem: {
-          select: {
-            id: true,
-            name: true,
-            batchNumber: true,
-            pickupInstructions: true,
-          },
-        },
-        payment: {
-          select: {
-            status: true,
-            providerPayloadJson: true,
-            providerReference: true,
-            updatedAt: true,
-          },
-        },
-      },
+      });
+
+      if (payload.action === 'STORE_CREDIT') {
+        await issueStoreCredit({
+          userId: order.userId,
+          sourceOrderId: order.id,
+          amount: resolutionRecord.totalAmount,
+          note: `Store credit for ${resolutionRecord.itemsSummary}`,
+          createdByUserId: req.admin.userId,
+          client: tx,
+        });
+      }
+
+      return updated;
     });
 
     let emailSent = false;
@@ -2917,10 +2943,23 @@ export async function resolvePaymentHandler(req, res, next) {
             totalRefunded: sumSnapshotItemLineTotals(selectedItems),
             reason: payload.comment,
           });
+        } else if (payload.action === 'STORE_CREDIT') {
+          await sendOrderStoreCreditEmail({
+            email: updatedOrder.user.email,
+            firstName,
+            displayOrderReference: getDisplayOrderReference(updatedOrder),
+            itemsSummary: summarizeSnapshotItems(selectedItems),
+            quantity: sumSnapshotItemQuantity(selectedItems),
+            totalCredited: sumSnapshotItemLineTotals(selectedItems),
+            reason: payload.comment,
+          });
         } else {
           await sendOrderCancellationEmail({
             email: updatedOrder.user.email,
             firstName,
+            displayOrderReference: getDisplayOrderReference(updatedOrder),
+            itemsSummary: summarizeSnapshotItems(selectedItems),
+            quantity: sumSnapshotItemQuantity(selectedItems),
             reason: payload.comment,
           });
         }
@@ -2935,7 +2974,7 @@ export async function resolvePaymentHandler(req, res, next) {
     }
 
     return res.json({
-      message: `${payload.action === 'REFUNDED' ? 'Refund' : 'Cancellation'} saved successfully.`,
+      message: `${payload.action === 'REFUNDED' ? 'Refund' : payload.action === 'STORE_CREDIT' ? 'Store credit' : 'Cancellation'} saved successfully.`,
       emailSent,
       resolvedItems: selectedItems,
       resolvedQuantity: sumSnapshotItemQuantity(selectedItems),
@@ -3360,7 +3399,7 @@ export async function listDiscountOrdersHandler(req, res, next) {
     const orders = await prisma.order.findMany({
       where: {
         notes: { contains: '"discountOrder":true' },
-        ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+        ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
       },
       orderBy: { createdAt: query.sortOrder },
       include: {
@@ -3690,7 +3729,7 @@ export async function listOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -3829,7 +3868,7 @@ export async function exportOrdersHandler(req, res, next) {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
-      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
+      ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
     const orders = await prisma.order.findMany({
@@ -4490,7 +4529,7 @@ export async function markIncompleteOrderPendingReviewHandler(req, res, next) {
       return res.status(409).json({ message: 'Only incomplete Interac e-Transfer orders can be moved to pending review.' });
     }
 
-    if (!isValidReceiptObjectKey(payload.orderReference, payload.transferProof.objectKey)) {
+    if (payload.transferProof && !isValidReceiptObjectKey(payload.orderReference, payload.transferProof.objectKey)) {
       return res.status(409).json({ message: 'Uploaded receipt does not match this order.' });
     }
 
@@ -4498,7 +4537,7 @@ export async function markIncompleteOrderPendingReviewHandler(req, res, next) {
       ? order.payment.providerPayloadJson
       : {};
 
-    const storedTransferProof = buildStoredTransferProof(payload.transferProof);
+    const storedTransferProof = payload.transferProof ? buildStoredTransferProof(payload.transferProof) : null;
 
     await prisma.order.update({
       where: { orderReference: payload.orderReference },
@@ -4510,7 +4549,7 @@ export async function markIncompleteOrderPendingReviewHandler(req, res, next) {
             status: 'PENDING_REVIEW',
             providerPayloadJson: {
               ...existingPayload,
-              transferProof: storedTransferProof,
+              ...(storedTransferProof ? { transferProof: storedTransferProof } : {}),
               adminRecovery: {
                 comment: payload.comment,
                 updatedByUserId: req.admin.userId,

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { env } from '../config/env.js';
 import { isHelcimConfigured, isS3Configured, isStripeConfigured } from '../config/env.js';
@@ -7,6 +8,7 @@ import { getManualPaymentInstructions } from './paymentService.js';
 import { retrieveStripePaymentIntent } from './paymentService.js';
 import { validateHelcimPayResponse } from './paymentService.js';
 import { sendOrderPaidEmail } from './emailService.js';
+import { useStoreCredit } from './storeCreditService.js';
 import { formatDisplayOrderReference, getDisplayOrderReference } from '../utils/orderReference.js';
 import { APP_TIME_ZONE, getCentralDateParts } from '../utils/centralTime.js';
 import {
@@ -141,6 +143,20 @@ function calculateOrderTotalAmount({ subtotal, deliveryFee, paymentMethod }) {
   };
 }
 
+function calculatePayableAmounts({ subtotal, deliveryFee, paymentMethod, storeCreditApplied = 0 }) {
+  const baseAmount = getBaseOrderAmount({ subtotal, deliveryFee });
+  const creditAmount = Math.max(0, Number(storeCreditApplied) || 0);
+  const baseAmountDue = Math.max(0, baseAmount - creditAmount);
+  const stripeProcessingFee = paymentMethod === 'STRIPE_CARD' ? calculateStripeProcessingFee(baseAmountDue) : 0;
+
+  return {
+    baseAmount,
+    stripeProcessingFee,
+    totalAmount: baseAmount + stripeProcessingFee,
+    amountDue: baseAmountDue + stripeProcessingFee,
+  };
+}
+
 function isCardPaymentMethod(paymentMethod) {
   return paymentMethod === 'STRIPE_CARD' || paymentMethod === 'HELCIM_CARD';
 }
@@ -183,6 +199,10 @@ function isOrderSequenceUniqueConstraintError(error) {
       || String(error?.message || '').includes('order_sequence')
     )
   );
+}
+
+function isTransactionRetryableError(error) {
+  return error?.code === 'P2034';
 }
 
 async function reserveNextOrderSequence(tx, { batchNumber, salesItemId }) {
@@ -233,6 +253,8 @@ async function findReusableIncompleteOrder(tx, {
   subtotal,
   deliveryFee,
   totalAmount,
+  storeCreditApplied = 0,
+  amountDue = totalAmount,
   cartSnapshot,
 }) {
   const candidates = await tx.order.findMany({
@@ -244,6 +266,8 @@ async function findReusableIncompleteOrder(tx, {
       subtotal,
       serviceFee: deliveryFee,
       totalAmount,
+      storeCreditApplied,
+      amountDue,
       status: { in: ['PENDING_PAYMENT', 'AWAITING_MANUAL_PAYMENT'] },
       paymentStatus: 'PENDING_PAYMENT',
     },
@@ -293,6 +317,7 @@ export async function createPendingOrder(payload) {
     items,
     paymentMethod,
     preferredPickupLocation,
+    storeCreditAmount = 0,
   } = payload;
   const name = buildBuyerName({ title, firstName, lastName });
   const uniqueSalesItemIds = [...new Set(items.map((item) => item.salesItemId))];
@@ -354,13 +379,20 @@ export async function createPendingOrder(payload) {
   const deliveryFee = calculateGroupedDeliveryFee(orderLines);
   const storedPaymentMethod = paymentMethod || 'STRIPE_CARD';
   const hasExplicitPaymentMethod = Boolean(paymentMethod);
-  const isManualFlow = hasExplicitPaymentMethod && !isCardPaymentMethod(paymentMethod);
-  const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
-  const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
+  const requestedStoreCreditAmount = Math.max(0, Number(storeCreditAmount) || 0);
+  const initialPaymentMethodForFee = hasExplicitPaymentMethod ? storedPaymentMethod : null;
+  const { stripeProcessingFee, totalAmount, amountDue } = calculatePayableAmounts({
     subtotal,
     deliveryFee,
-    paymentMethod: hasExplicitPaymentMethod ? storedPaymentMethod : null,
+    paymentMethod: initialPaymentMethodForFee,
+    storeCreditApplied: requestedStoreCreditAmount,
   });
+  const isFullyPaidByStoreCredit = requestedStoreCreditAmount > 0 && amountDue === 0;
+  const isManualFlow = hasExplicitPaymentMethod && !isCardPaymentMethod(paymentMethod) && !isFullyPaidByStoreCredit;
+  const isInteracFlow = paymentMethod === 'INTERAC_E_TRANSFER';
+  if (requestedStoreCreditAmount > subtotal + deliveryFee) {
+    throw new Error('Store credit cannot be more than the order amount.');
+  }
   const manualInstructions = null;
   const cartSnapshot = {
     preferredPickupLocation: orderFulfillmentMethod === 'PICKUP' ? preferredPickupLocation : null,
@@ -462,6 +494,8 @@ export async function createPendingOrder(payload) {
           subtotal,
           deliveryFee,
           totalAmount,
+          storeCreditApplied: requestedStoreCreditAmount,
+          amountDue,
           cartSnapshot,
         });
 
@@ -479,7 +513,7 @@ export async function createPendingOrder(payload) {
           orderSequence,
         });
 
-        return tx.order.create({
+        const createdOrder = await tx.order.create({
           data: {
             createdAt: orderCreatedAt,
             displayOrderReference,
@@ -496,22 +530,48 @@ export async function createPendingOrder(payload) {
             subtotal,
             serviceFee: deliveryFee,
             totalAmount,
+            storeCreditApplied: requestedStoreCreditAmount,
+            amountDue,
             notes: JSON.stringify(cartSnapshot),
-            status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
-            paymentStatus: 'PENDING_PAYMENT',
+            status: isFullyPaidByStoreCredit ? 'CONFIRMED' : isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
+            paymentStatus: isFullyPaidByStoreCredit ? 'PAID' : 'PENDING_PAYMENT',
+            paidAt: isFullyPaidByStoreCredit ? new Date() : null,
             payment: {
               create: {
                 method: storedPaymentMethod,
-                status: 'PENDING_PAYMENT',
+                status: isFullyPaidByStoreCredit ? 'PAID' : 'PENDING_PAYMENT',
+                providerPayloadJson: requestedStoreCreditAmount > 0
+                  ? {
+                      storeCredit: {
+                        appliedAmount: requestedStoreCreditAmount,
+                      },
+                    }
+                  : undefined,
               },
             },
           },
         });
-      });
+
+        if (requestedStoreCreditAmount > 0) {
+          await useStoreCredit({
+            userId: user.id,
+            orderId: createdOrder.id,
+            amount: requestedStoreCreditAmount,
+            note: `Applied to order ${displayOrderReference}`,
+            client: tx,
+          });
+        }
+
+        return createdOrder;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       break;
     } catch (error) {
       if (
-        (!isDisplayOrderReferenceUniqueConstraintError(error) && !isOrderSequenceUniqueConstraintError(error))
+        (
+          !isDisplayOrderReferenceUniqueConstraintError(error) &&
+          !isOrderSequenceUniqueConstraintError(error) &&
+          !isTransactionRetryableError(error)
+        )
         || attempt === 3
       ) {
         throw error;
@@ -535,6 +595,8 @@ export async function createPendingOrder(payload) {
     batchNumber: primaryLine.salesItem.batchNumber,
     createdAt: order.createdAt,
     totalAmount: order.totalAmount,
+    amountDue: order.amountDue,
+    storeCreditApplied: order.storeCreditApplied,
     subtotal: order.subtotal,
     deliveryFee: order.serviceFee,
     stripeProcessingFee,
@@ -542,6 +604,8 @@ export async function createPendingOrder(payload) {
     preferredPickupLocation: order.preferredPickupLocation,
     cartItems: cartSnapshot.items,
     paymentMethod: hasExplicitPaymentMethod ? order.paymentMethod : null,
+    paymentStatus: order.paymentStatus,
+    status: order.status,
     paymentInstructions: resolvedManualInstructions,
     manualPayment: isManualFlow
       ? {
@@ -769,9 +833,10 @@ export async function createAdminDiscountOrder(payload) {
             paymentMethod,
             currency: anchorSalesItem.currency || 'CAD',
             subtotal,
-            serviceFee: deliveryFee,
-            totalAmount,
-            notes: JSON.stringify(cartSnapshot),
+	            serviceFee: deliveryFee,
+	            totalAmount,
+	            amountDue: totalAmount,
+	            notes: JSON.stringify(cartSnapshot),
             status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
             paymentStatus: isManualFlow ? 'PENDING_REVIEW' : 'PENDING_PAYMENT',
             payment: {
@@ -878,10 +943,11 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
         orderReference: getDisplayOrderReference(order),
       })
     : null;
-  const { stripeProcessingFee, totalAmount } = calculateOrderTotalAmount({
+  const { stripeProcessingFee, totalAmount, amountDue } = calculatePayableAmounts({
     subtotal: order.subtotal,
     deliveryFee: order.serviceFee,
     paymentMethod,
+    storeCreditApplied: order.storeCreditApplied || 0,
   });
 
   const updated = await prisma.order.update({
@@ -889,6 +955,7 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
     data: {
       paymentMethod,
       totalAmount,
+      amountDue,
       status: isManualFlow ? 'AWAITING_MANUAL_PAYMENT' : 'PENDING_PAYMENT',
       paymentStatus: 'PENDING_PAYMENT',
       fulfillmentStatus: getInitialFulfillmentStatus(order.fulfillmentMethod),
@@ -911,6 +978,8 @@ export async function setOrderPaymentMethodByReference({ orderReference, payment
     batchNumber: order.salesItem?.batchNumber || '',
     createdAt: updated.createdAt,
     totalAmount: updated.totalAmount,
+    amountDue: updated.amountDue,
+    storeCreditApplied: updated.storeCreditApplied,
     subtotal: updated.subtotal,
     deliveryFee: updated.serviceFee,
     stripeProcessingFee,
@@ -947,8 +1016,12 @@ export async function createOrderPaymentIntent(orderReference) {
     throw new Error('Order is not in pending payment state');
   }
 
+  if ((order.amountDue || order.totalAmount) <= 0) {
+    throw new Error('No payment is due for this order.');
+  }
+
   const paymentIntent = await createStripePaymentIntent({
-    amount: order.totalAmount,
+    amount: order.amountDue || order.totalAmount,
     currency: order.currency,
     orderReference: order.orderReference,
     customerEmail: order.user.email,
@@ -992,8 +1065,12 @@ export async function createOrderHelcimCheckoutSession(orderReference) {
     throw new Error('Payment is already confirmed for this order.');
   }
 
+  if ((order.amountDue || order.totalAmount) <= 0) {
+    throw new Error('No payment is due for this order.');
+  }
+
   const checkoutSession = await createHelcimCheckoutSession({
-    amount: order.totalAmount,
+    amount: order.amountDue || order.totalAmount,
     currency: order.currency,
     orderReference: getDisplayOrderReference(order),
   });
@@ -1305,7 +1382,7 @@ export async function confirmHelcimPaymentByReference({ orderReference, checkout
   }
 
   const helcimAmountCents = Math.round(Number(transactionData.amount || 0) * 100);
-  if (helcimAmountCents !== order.totalAmount) {
+  if (helcimAmountCents !== (order.amountDue || order.totalAmount)) {
     throw new Error('Helcim payment amount does not match this order.');
   }
 

@@ -24,6 +24,11 @@ export async function getActivePickupLocationNames() {
   return locations.map((location) => location.name);
 }
 
+export async function getAllPickupLocationNames() {
+  const locations = await listAllPickupLocations();
+  return locations.map((location) => location.name);
+}
+
 export async function hasActivePickupLocation(name) {
   if (!name) {
     return false;

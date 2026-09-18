@@ -26,6 +26,7 @@ export const createOrderSchema = z.object({
     .optional(),
   preferredPickupLocation: z
     .preprocess((v) => (v === undefined ? undefined : sanitizeText(v)), z.string().min(2).max(180).optional()),
+  storeCreditAmount: z.number().int().min(0).optional().default(0),
 }).superRefine((payload, ctx) => {
   if (!payload.existingCustomerId) {
     const requiredFields = [

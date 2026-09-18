@@ -66,6 +66,12 @@ enum CustomerUpdateRequestStatus {
   DECLINED
 }
 
+enum StoreCreditLedgerType {
+  CREDIT_ISSUED
+  CREDIT_USED
+  CREDIT_REVERSED
+}
+
 model User {
   id                  String    @id @default(uuid())
   name                String    @map("name")
@@ -89,6 +95,7 @@ model User {
   inviteTokenExpiresAt DateTime? @map("invite_token_expires_at")
   lastLoginAt         DateTime? @map("last_login_at")
   orders              Order[]
+  storeCreditEntries  StoreCreditLedger[] @relation("StoreCreditUser")
   customerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestCustomer")
   reviewedCustomerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestReviewer")
   createdAt           DateTime  @default(now()) @map("created_at")
@@ -154,14 +161,38 @@ model Order {
   currency       String        @default("CAD")
   subtotal       Int
   serviceFee     Int           @default(0) @map("service_fee")
+  storeCreditApplied Int       @default(0) @map("store_credit_applied")
+  amountDue      Int           @default(0) @map("amount_due")
   notes          String?
   payment        Payment?
   items          OrderItem[]
+  storeCreditUsages StoreCreditLedger[] @relation("StoreCreditOrder")
+  storeCreditSources StoreCreditLedger[] @relation("StoreCreditSourceOrder")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
   @@map("orders")
   @@unique([salesItemId, orderSequence])
+}
+
+model StoreCreditLedger {
+  id              String                @id @default(uuid())
+  userId          String                @map("user_id")
+  user            User                  @relation("StoreCreditUser", fields: [userId], references: [id], onDelete: Cascade)
+  orderId         String?               @map("order_id")
+  order           Order?                @relation("StoreCreditOrder", fields: [orderId], references: [id], onDelete: SetNull)
+  sourceOrderId   String?               @map("source_order_id")
+  sourceOrder     Order?                @relation("StoreCreditSourceOrder", fields: [sourceOrderId], references: [id], onDelete: SetNull)
+  amount          Int
+  type            StoreCreditLedgerType
+  note            String?
+  createdByUserId String?               @map("created_by_user_id")
+  createdAt       DateTime              @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([orderId])
+  @@index([sourceOrderId])
+  @@map("store_credit_ledger")
 }
 
 model PickupLocation {

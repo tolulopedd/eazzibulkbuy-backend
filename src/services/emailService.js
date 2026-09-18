@@ -368,6 +368,9 @@ export async function sendOrderRefundEmail({
 export async function sendOrderCancellationEmail({
   email,
   firstName,
+  displayOrderReference,
+  itemsSummary,
+  quantity,
   reason,
 }) {
   await sendMail({
@@ -376,7 +379,43 @@ export async function sendOrderCancellationEmail({
     text: [
       `Hello ${firstName},`,
       '',
-      'Your order has been cancelled',
+      'The following item(s) from your order have been cancelled.',
+      '',
+      `Order reference: ${displayOrderReference}`,
+      `Items: ${itemsSummary}`,
+      `Quantity: ${quantity}`,
+      '',
+      `Reason: ${reason}`,
+      '',
+      'Thank you for your continued patronage.',
+      '',
+      'Regards',
+      'EazziBulkBuy',
+    ].join('\n'),
+  });
+}
+
+export async function sendOrderStoreCreditEmail({
+  email,
+  firstName,
+  displayOrderReference,
+  itemsSummary,
+  quantity,
+  totalCredited,
+  reason,
+}) {
+  await sendMail({
+    to: email,
+    subject: 'Store Credit Update',
+    text: [
+      `Hello ${firstName},`,
+      '',
+      'The following item(s) from your order have been cancelled and converted to store credit.',
+      '',
+      `Order reference: ${displayOrderReference}`,
+      `Items: ${itemsSummary}`,
+      `Quantity: ${quantity}`,
+      `Store credit issued: CAD ${(Number(totalCredited || 0) / 100).toFixed(2)}`,
       '',
       `Reason: ${reason}`,
       '',

@@ -2,6 +2,7 @@ import { prisma } from '../config/prisma.js';
 import { z } from 'zod';
 import { sanitizeEmail, sanitizeText } from '../utils/sanitize.js';
 import { sendBuyerWelcomeEmail } from '../services/emailService.js';
+import { getStoreCreditBalanceForUser } from '../services/storeCreditService.js';
 
 const phoneSchema = z.string().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits.');
 
@@ -56,11 +57,14 @@ export async function searchCustomersHandler(req, res, next) {
       },
     });
 
+    const balances = await Promise.all(users.map((user) => getStoreCreditBalanceForUser(user.id)));
+
     return res.json(
-      users.map((user) => ({
+      users.map((user, index) => ({
         id: user.id,
         fullName: user.name,
         email: user.email,
+        storeCreditBalance: balances[index] || 0,
       }))
     );
   } catch (error) {
@@ -143,6 +147,7 @@ export async function saveCustomerDetailsHandler(req, res, next) {
         city: user.city,
         province: user.province,
         postalCode: user.postalCode,
+        storeCreditBalance: 0,
       },
     });
   } catch (error) {
