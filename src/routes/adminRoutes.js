@@ -11,11 +11,13 @@ import {
   updateSalesItemHandler,
   deleteSalesItemHandler,
   listCustomersHandler,
+  customerStatementHandler,
   listOrdersHandler,
   exportOrdersHandler,
   updatePreferredPickupLocationHandler,
   updateFulfillmentStatusHandler,
   updatePartialFulfillmentHandler,
+  undoPartialFulfillmentHandler,
   confirmInteracPaymentHandler,
   createAdminIncompleteOrderUploadHandler,
   markIncompleteOrderPendingReviewHandler,
@@ -28,11 +30,16 @@ import {
   approveCustomerUpdateRequestHandler,
   declineCustomerUpdateRequestHandler,
   exportCustomersHandler,
+  listCustomerNotesHandler,
+  createCustomerNoteHandler,
+  listCustomerNoteNotificationsHandler,
+  markCustomerNoteNotificationsReadHandler,
   listDiscountOrdersHandler,
   listPickupNoticesHandler,
   pickupAllocationPendingSummaryHandler,
   previewPickupAllocationHandler,
   sendPickupNoticesHandler,
+  sendGeneralNoticesHandler,
 } from '../controllers/adminController.js';
 import {
   listAdminPickupLocationsHandler,
@@ -77,6 +84,11 @@ router.get('/reports', requireAdminRoles('ADMIN', 'SUPERADMIN'), adminReportsHan
 router.get('/reports/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportReportsHandler);
 router.get('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), listCustomersHandler);
 router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportCustomersHandler);
+router.get('/customers/:customerId/statement', requireAdminRoles('ADMIN', 'SUPERADMIN'), customerStatementHandler);
+router.get('/customers/:customerId/notes', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomerNotesHandler);
+router.post('/customers/:customerId/notes', requireAdminRoles('ADMIN', 'SUPERADMIN'), createCustomerNoteHandler);
+router.get('/customer-note-notifications', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomerNoteNotificationsHandler);
+router.post('/customer-note-notifications/read', requireAdminRoles('ADMIN', 'SUPERADMIN'), markCustomerNoteNotificationsReadHandler);
 router.post('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminCustomerHandler);
 router.patch('/customers/:customerId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updateCustomerHandler);
 router.post('/customers/update-requests/:requestId/approve', requireAdminRoles('ADMIN', 'SUPERADMIN'), approveCustomerUpdateRequestHandler);
@@ -88,6 +100,7 @@ router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPick
 router.get('/pickup-notices/allocation-pending-summary', requireAdminRoles('ADMIN', 'SUPERADMIN'), pickupAllocationPendingSummaryHandler);
 router.post('/pickup-notices/allocation-preview', requireAdminRoles('ADMIN', 'SUPERADMIN'), previewPickupAllocationHandler);
 router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
+router.post('/general-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendGeneralNoticesHandler);
 router.get('/pickup-notice-templates', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticeTemplatesHandler);
 router.post('/pickup-notice-templates', requireAdminRoles('ADMIN', 'SUPERADMIN'), createPickupNoticeTemplateHandler);
 router.patch('/pickup-notice-templates/:templateId', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePickupNoticeTemplateHandler);
@@ -112,6 +125,7 @@ router.get('/orders/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), exportOrd
 router.patch('/orders/:orderReference/preferred-pickup-location', requireAdminRoles('ADMIN', 'SUPERADMIN'), updatePreferredPickupLocationHandler);
 router.patch('/orders/:orderReference/fulfillment-status', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), updateFulfillmentStatusHandler);
 router.patch('/orders/:orderReference/partial-fulfillment', requireAdminRoles('ADMIN', 'SUPERADMIN', 'PARTNER'), updatePartialFulfillmentHandler);
+router.patch('/orders/:orderReference/partial-fulfillment/undo', requireAdminRoles('ADMIN', 'SUPERADMIN'), undoPartialFulfillmentHandler);
 router.get('/payments/:orderReference/proof-view-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), paymentProofViewUrlHandler);
 router.post('/payments/:orderReference/incomplete-upload-url', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminIncompleteOrderUploadHandler);
 router.post('/payments/:orderReference/mark-pending-review', requireAdminRoles('ADMIN', 'SUPERADMIN'), markIncompleteOrderPendingReviewHandler);

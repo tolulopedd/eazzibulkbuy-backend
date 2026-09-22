@@ -96,6 +96,11 @@ model User {
   lastLoginAt         DateTime? @map("last_login_at")
   orders              Order[]
   storeCreditEntries  StoreCreditLedger[] @relation("StoreCreditUser")
+  customerAuditLogs    CustomerAuditLog[] @relation("CustomerAuditLogCustomer")
+  createdCustomerAuditLogs CustomerAuditLog[] @relation("CustomerAuditLogActor")
+  customerNotes       CustomerNote[] @relation("CustomerNoteCustomer")
+  createdCustomerNotes CustomerNote[] @relation("CustomerNoteActor")
+  readCustomerNotes   CustomerNote[] @relation("CustomerNoteReader")
   customerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestCustomer")
   reviewedCustomerUpdateRequests CustomerUpdateRequest[] @relation("CustomerUpdateRequestReviewer")
   createdAt           DateTime  @default(now()) @map("created_at")
@@ -166,6 +171,7 @@ model Order {
   notes          String?
   payment        Payment?
   items          OrderItem[]
+  customerNotes  CustomerNote[]
   storeCreditUsages StoreCreditLedger[] @relation("StoreCreditOrder")
   storeCreditSources StoreCreditLedger[] @relation("StoreCreditSourceOrder")
   createdAt      DateTime      @default(now()) @map("created_at")
@@ -277,4 +283,46 @@ model CustomerUpdateRequest {
   updatedAt     DateTime                    @updatedAt @map("updated_at")
 
   @@map("customer_update_requests")
+}
+
+model CustomerAuditLog {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  user            User     @relation("CustomerAuditLogCustomer", fields: [userId], references: [id], onDelete: Cascade)
+  action          String
+  beforeJson      Json?    @map("before_json")
+  afterJson       Json?    @map("after_json")
+  changedByUserId String?  @map("changed_by_user_id")
+  changedBy       User?    @relation("CustomerAuditLogActor", fields: [changedByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([changedByUserId])
+  @@map("customer_audit_logs")
+}
+
+model CustomerNote {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  user            User     @relation("CustomerNoteCustomer", fields: [userId], references: [id], onDelete: Cascade)
+  orderId         String?  @map("order_id")
+  order           Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderReferences String[] @default([]) @map("order_references")
+  source          String   @default("ADMIN") @map("source")
+  note            String   @map("note")
+  messageType     String?  @map("message_type")
+  createdByUserId String?  @map("created_by_user_id")
+  createdBy       User?    @relation("CustomerNoteActor", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  readAt          DateTime? @map("read_at")
+  readByUserId    String?  @map("read_by_user_id")
+  readBy          User?    @relation("CustomerNoteReader", fields: [readByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([orderId])
+  @@index([createdByUserId])
+  @@index([source, readAt, createdAt])
+  @@index([readByUserId])
+  @@map("customer_notes")
 }

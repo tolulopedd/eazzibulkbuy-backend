@@ -49,6 +49,40 @@ function renderTextAsHtml(text) {
     .join('');
 }
 
+function buildCustomerFeedbackUrl(email) {
+  const baseUrl = String(env.frontendUrl || '').replace(/\/$/, '');
+  const params = new URLSearchParams();
+  if (email) {
+    params.set('email', email);
+  }
+  return `${baseUrl}/customer-feedback${params.toString() ? `?${params.toString()}` : ''}`;
+}
+
+function appendCustomerFeedbackLink({ text, html, feedbackEmail }) {
+  if (!feedbackEmail) {
+    return { text, html };
+  }
+
+  const feedbackUrl = buildCustomerFeedbackUrl(feedbackEmail);
+  const feedbackText = [
+    '',
+    '',
+    'Have a note or feedback for us?',
+    `Submit it here: ${feedbackUrl}`,
+  ].join('\n');
+  const feedbackHtml = `
+    <p style="margin:28px 0 0 0;">
+      Have a note or feedback for us?<br />
+      <a href="${escapeHtml(feedbackUrl)}" style="color:#047857; font-weight:700;">Submit it here</a>
+    </p>
+  `;
+
+  return {
+    text: `${text || ''}${feedbackText}`,
+    html: html ? `${html}${feedbackHtml}` : html,
+  };
+}
+
 function normalizePickupNoticeBodySpacing(text) {
   return String(text || '').replace(
     /(Preferred pickup location:[^\n]*)(\n+)(Pickup Address:)/i,
@@ -141,10 +175,12 @@ async function sendWithSmtp({ to, subject, text, html }) {
   });
 }
 
-export async function sendMail({ to, subject, text, html }) {
+export async function sendMail({ to, subject, text, html, feedbackEmail }) {
+  const message = appendCustomerFeedbackLink({ text, html, feedbackEmail });
+
   if (isResendConfigured) {
     try {
-      await sendWithResend({ to, subject, text, html });
+      await sendWithResend({ to, subject, text: message.text, html: message.html });
       return;
     } catch (error) {
       console.error('Resend delivery failed, falling back to next provider', {
@@ -157,7 +193,7 @@ export async function sendMail({ to, subject, text, html }) {
 
   if (smtpTransporter) {
     try {
-      await sendWithSmtp({ to, subject, text, html });
+      await sendWithSmtp({ to, subject, text: message.text, html: message.html });
       return;
     } catch (error) {
       console.error('SMTP delivery failed, using dry-run fallback', {
@@ -169,7 +205,7 @@ export async function sendMail({ to, subject, text, html }) {
     }
   }
 
-  console.log('[email:dry-run]', { provider: 'dry-run', to, subject, text, html });
+  console.log('[email:dry-run]', { provider: 'dry-run', to, subject, text: message.text, html: message.html });
 }
 
 export async function sendOrderPaidEmail({
@@ -183,6 +219,7 @@ export async function sendOrderPaidEmail({
   await sendMail({
     to: email,
     subject: 'Order Confirmation',
+    feedbackEmail: email,
     text: [
       `Hello ${firstName},`,
       '',
@@ -213,6 +250,7 @@ export async function sendOrderFulfillmentCompletedEmail({
   await sendMail({
     to: email,
     subject: 'Order Receipt/Delivery',
+    feedbackEmail: email,
     text: [
       `Hello ${firstName},`,
       '',
@@ -324,6 +362,7 @@ export async function sendOrderReadyNoticeEmail({
   await sendMail({
     to: email,
     subject,
+    feedbackEmail: email,
     text: customText || defaultText,
     html: `
       <div style="font-family:Arial,Helvetica,sans-serif; color:#0f172a; font-size:16px; line-height:1.7;">
@@ -345,6 +384,7 @@ export async function sendOrderRefundEmail({
   await sendMail({
     to: email,
     subject: 'Order Refund Update',
+    feedbackEmail: email,
     text: [
       `Hello ${firstName},`,
       '',
@@ -376,6 +416,7 @@ export async function sendOrderCancellationEmail({
   await sendMail({
     to: email,
     subject: 'Order Cancellation Update',
+    feedbackEmail: email,
     text: [
       `Hello ${firstName},`,
       '',
@@ -407,6 +448,7 @@ export async function sendOrderStoreCreditEmail({
   await sendMail({
     to: email,
     subject: 'Store Credit Update',
+    feedbackEmail: email,
     text: [
       `Hello ${firstName},`,
       '',
@@ -431,6 +473,7 @@ export async function sendBuyerWelcomeEmail({ email, buyerName }) {
   await sendMail({
     to: email,
     subject: 'Welcome to EazziBulkBuy',
+    feedbackEmail: email,
     text: [
       `Hello ${buyerName},`,
       '',

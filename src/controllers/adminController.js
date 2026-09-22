@@ -20,6 +20,7 @@ import {
   sendOrderRefundEmail,
   sendOrderStoreCreditEmail,
   sendOrderReadyNoticeEmail,
+  sendMail,
 } from '../services/emailService.js';
 import { retrieveStripePaymentIntent } from '../services/paymentService.js';
 import { DISCOUNT_ORDER_SYSTEM_SALES_ITEM_NAME } from '../constants/systemSalesItems.js';
@@ -284,6 +285,26 @@ function sumSnapshotItemLineTotals(items = []) {
 function getDiscountOrderMeta(order) {
   const snapshot = parseOrderNotes(order.notes);
   return snapshot?.meta?.discountOrder ? snapshot.meta : null;
+}
+
+function pickCustomerAuditFields(customer = {}) {
+  return {
+    name: customer.name || null,
+    title: customer.title || null,
+    firstName: customer.firstName || null,
+    lastName: customer.lastName || null,
+    email: customer.email || null,
+    phone: customer.phone || null,
+    address: customer.address || null,
+    city: customer.city || null,
+    province: customer.province || null,
+    postalCode: customer.postalCode || null,
+    isActive: customer.isActive ?? null,
+  };
+}
+
+function getCustomerChangedFields(before = {}, after = {}) {
+  return Object.keys(after).filter((key) => String(before[key] ?? '') !== String(after[key] ?? ''));
 }
 
 function getOrderSalesItemIds(order) {
@@ -1027,6 +1048,28 @@ const reviewCustomerUpdateRequestSchema = z.object({
   requestId: z.string().uuid(),
 });
 
+const customerStatementParamsSchema = z.object({
+  customerId: z.string().uuid(),
+});
+
+const createCustomerNoteSchema = z.object({
+  note: z.string().trim().min(1).max(4000),
+  orderId: z.string().uuid().optional().nullable(),
+  orderIds: z.array(z.string().uuid()).max(25).optional().default([]),
+  orderReference: z.string().trim().max(80).optional().nullable(),
+  messageType: z.string().trim().max(80).optional().nullable(),
+});
+
+const markCustomerNoteNotificationsReadSchema = z.object({
+  noteIds: z.array(z.string().uuid()).max(100).optional().default([]),
+});
+
+const sendGeneralNoticesSchema = z.object({
+  customerIds: z.array(z.string().uuid()).min(1).max(200),
+  subject: z.string().trim().min(3).max(160),
+  message: z.string().trim().min(1).max(4000),
+});
+
 const discountOrderItemSchema = z.object({
   sourceType: z.enum(['SALES_EVENT', 'CUSTOM']),
   salesItemId: z.string().uuid().optional(),
@@ -1238,6 +1281,10 @@ const updatePreferredPickupLocationSchema = z.object({
 const partialFulfillmentSchema = z.object({
   itemIndex: z.number().int().min(0),
   quantity: z.coerce.number().int().min(1).max(100000),
+});
+
+const undoPartialFulfillmentSchema = z.object({
+  itemIndex: z.number().int().min(0),
 });
 
 async function findConflictingActiveBatchNumber(batchNumber, excludeSalesItemId) {
@@ -2626,6 +2673,84 @@ export async function sendPickupNoticesHandler(req, res, next) {
   }
 }
 
+export async function sendGeneralNoticesHandler(req, res, next) {
+  try {
+    const payload = sendGeneralNoticesSchema.parse(req.body);
+    const customerIds = [...new Set(payload.customerIds)];
+    const customers = await prisma.user.findMany({
+      where: {
+        id: { in: customerIds },
+        role: 'USER',
+      },
+      select: {
+        id: true,
+        name: true,
+        firstName: true,
+        email: true,
+      },
+    });
+
+    const customerById = new Map(customers.map((customer) => [customer.id, customer]));
+    const orderedCustomers = customerIds
+      .map((customerId) => customerById.get(customerId))
+      .filter(Boolean);
+    const results = [];
+
+    for (const customer of orderedCustomers) {
+      const sentAt = new Date().toISOString();
+      const firstName = customer.firstName || customer.name?.split(/\s+/)[0] || 'Customer';
+      if (!customer.email) {
+        results.push({
+          customerId: customer.id,
+          name: customer.name,
+          email: '',
+          status: 'skipped',
+          reason: 'Customer email is not available.',
+          sentAt,
+        });
+        continue;
+      }
+
+      try {
+        const messageText = payload.message.replace(/\{\{\s*Firstname\s*\}\}/gi, firstName);
+        await sendMail({
+          to: customer.email,
+          subject: payload.subject,
+          feedbackEmail: customer.email,
+          text: messageText,
+        });
+
+        results.push({
+          customerId: customer.id,
+          name: customer.name,
+          email: customer.email,
+          status: 'sent',
+          sentAt,
+        });
+      } catch (error) {
+        results.push({
+          customerId: customer.id,
+          name: customer.name,
+          email: customer.email,
+          status: 'failed',
+          reason: error?.message || 'Email send failed.',
+          sentAt,
+        });
+      }
+    }
+
+    const sentCount = results.filter((entry) => entry.status === 'sent').length;
+    return res.json({
+      message: sentCount
+        ? `General notice sent to ${sentCount} customer${sentCount === 1 ? '' : 's'}.`
+        : 'No general notices were sent.',
+      results,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function exportReportsHandler(req, res, next) {
   try {
     const query = adminReportsQuerySchema.parse(req.query);
@@ -3200,6 +3325,800 @@ export async function listCustomersHandler(req, res, next) {
   }
 }
 
+function addStatementEntry(entries, entry) {
+  if (!entry?.occurredAt) {
+    return;
+  }
+
+  entries.push({
+    id: entry.id,
+    occurredAt: entry.occurredAt,
+    type: entry.type,
+    title: entry.title,
+    details: entry.details || '',
+    orderReference: entry.orderReference || null,
+    itemSummary: entry.itemSummary || '',
+    quantity: entry.quantity ?? null,
+    amount: entry.amount ?? null,
+    balanceImpact: entry.balanceImpact ?? null,
+    method: entry.method || '',
+    status: entry.status || '',
+    actor: entry.actor || '',
+    metadata: entry.metadata || {},
+  });
+}
+
+function formatStatementOrderReference(order) {
+  return order.displayOrderReference || getDisplayOrderReference(order);
+}
+
+function formatStatementItemSummary(items = []) {
+  return summarizeSnapshotItems(items) || 'Order items';
+}
+
+function getStatementOrderItems(order) {
+  const snapshotItems = getOrderSnapshotItems(order);
+  if (snapshotItems.length) {
+    return snapshotItems;
+  }
+  return [buildFallbackSnapshotItem(order)];
+}
+
+function buildStatementEntries({ customer, orders, storeCreditEntries, updateRequests, auditLogs }) {
+  const entries = [];
+
+  addStatementEntry(entries, {
+    id: `customer-created:${customer.id}`,
+    occurredAt: customer.createdAt,
+    type: 'CUSTOMER_CREATED',
+    title: 'Customer created',
+    details: [customer.name, customer.email].filter(Boolean).join(' · '),
+    status: customer.isActive ? 'Active' : 'Inactive',
+  });
+
+  if (customer.updatedAt && new Date(customer.updatedAt).getTime() !== new Date(customer.createdAt).getTime()) {
+    addStatementEntry(entries, {
+      id: `customer-updated:${customer.id}`,
+      occurredAt: customer.updatedAt,
+      type: 'CUSTOMER_UPDATED',
+      title: 'Customer record updated',
+      details: 'Current saved customer profile was updated.',
+      status: customer.isActive ? 'Active' : 'Inactive',
+    });
+  }
+
+  for (const request of updateRequests) {
+    const requestedAddress = [request.address, request.city, request.province, request.postalCode].filter(Boolean).join(', ');
+    addStatementEntry(entries, {
+      id: `customer-update-requested:${request.id}`,
+      occurredAt: request.createdAt,
+      type: 'CUSTOMER_UPDATE_REQUESTED',
+      title: 'Customer update requested',
+      details: [`Phone: ${request.phone || '-'}`, `Address: ${requestedAddress || '-'}`].join(' · '),
+      status: request.status,
+    });
+
+    if (request.reviewedAt) {
+      addStatementEntry(entries, {
+        id: `customer-update-reviewed:${request.id}`,
+        occurredAt: request.reviewedAt,
+        type: request.status === 'APPROVED' ? 'CUSTOMER_UPDATE_APPROVED' : 'CUSTOMER_UPDATE_DECLINED',
+        title: request.status === 'APPROVED' ? 'Customer update approved' : 'Customer update declined',
+        details: requestedAddress || request.phone || 'Customer update request reviewed.',
+        status: request.status,
+        actor: request.reviewedBy?.email || '',
+      });
+    }
+  }
+
+  for (const log of auditLogs) {
+    const changedFields = Array.isArray(log.afterJson?.changedFields) ? log.afterJson.changedFields : [];
+    addStatementEntry(entries, {
+      id: `customer-audit:${log.id}`,
+      occurredAt: log.createdAt,
+      type: log.action || 'CUSTOMER_AUDIT',
+      title: log.action === 'CUSTOMER_UPDATE_APPROVED' ? 'Customer details changed from approved request' : 'Customer details changed',
+      details: changedFields.length ? `Changed: ${changedFields.join(', ')}` : 'Customer profile changed.',
+      status: 'COMPLETED',
+      actor: log.changedBy?.email || '',
+      metadata: {
+        before: log.beforeJson || null,
+        after: log.afterJson || null,
+      },
+    });
+  }
+
+  for (const order of orders) {
+    const orderReference = formatStatementOrderReference(order);
+    const snapshotItems = getStatementOrderItems(order);
+    const activeItems = snapshotItems.filter((item) => !isResolvedSnapshotItem(item));
+    const resolvedItems = snapshotItems.filter((item) => isResolvedSnapshotItem(item));
+    const itemSummary = formatStatementItemSummary(snapshotItems);
+
+    addStatementEntry(entries, {
+      id: `order-created:${order.id}`,
+      occurredAt: order.createdAt,
+      type: 'ORDER_CREATED',
+      title: 'Order created',
+      details: itemSummary,
+      orderReference,
+      itemSummary,
+      quantity: sumSnapshotItemQuantity(snapshotItems),
+      amount: order.totalAmount,
+      method: order.paymentMethod,
+      status: getDisplayPaymentStatus(order),
+    });
+
+    if (order.paidAt || isOrderPaidLike(order)) {
+      addStatementEntry(entries, {
+        id: `payment-paid:${order.id}`,
+        occurredAt: order.paidAt || order.payment?.updatedAt || order.updatedAt,
+        type: 'PAYMENT_COMPLETED',
+        title: 'Payment completed',
+        details: itemSummary,
+        orderReference,
+        itemSummary,
+        quantity: sumSnapshotItemQuantity(activeItems.length ? activeItems : snapshotItems),
+        amount: order.amountDue ?? order.totalAmount,
+        method: order.paymentMethod,
+        status: order.paymentStatus,
+      });
+    } else {
+      addStatementEntry(entries, {
+        id: `payment-status:${order.id}`,
+        occurredAt: order.payment?.updatedAt || order.updatedAt || order.createdAt,
+        type: 'PAYMENT_STATUS',
+        title: 'Payment status',
+        details: itemSummary,
+        orderReference,
+        itemSummary,
+        amount: order.amountDue ?? order.totalAmount,
+        method: order.paymentMethod,
+        status: order.paymentStatus,
+      });
+    }
+
+    for (const item of resolvedItems) {
+      const action = item.paymentResolution?.action || 'RESOLVED';
+      const resolvedAt = item.paymentResolution?.resolvedAt || order.payment?.updatedAt || order.updatedAt;
+      const actionTitle = action === 'STORE_CREDIT'
+        ? 'Item converted to store credit'
+        : action === 'REFUNDED'
+          ? 'Item refunded'
+          : 'Item cancelled';
+
+      addStatementEntry(entries, {
+        id: `payment-resolution:${order.id}:${item.sourceIndex ?? item.name}:${action}`,
+        occurredAt: resolvedAt,
+        type: `ITEM_${action}`,
+        title: actionTitle,
+        details: item.paymentResolution?.comment || `${item.name} x${item.quantity}`,
+        orderReference,
+        itemSummary: `${item.name} x${item.quantity}`,
+        quantity: Number(item.quantity) || 0,
+        amount: Number(item.lineTotal) || null,
+        method: order.paymentMethod,
+        status: action,
+      });
+    }
+
+    for (const item of normalizeFulfillmentItems(order)) {
+      if (!isCompletedFulfillmentItem(item)) {
+        continue;
+      }
+
+      addStatementEntry(entries, {
+        id: `fulfillment:${order.id}:${item.itemIndex}`,
+        occurredAt: item.fulfilledAt || order.updatedAt,
+        type: item.fulfillmentStatus === 'DELIVERED' ? 'ITEM_DELIVERED' : 'ITEM_PICKED_UP',
+        title: item.fulfillmentStatus === 'DELIVERED' ? 'Item delivered' : 'Item picked up',
+        details: [
+          `${item.name} x${item.quantity}`,
+          item.preferredPickupLocation || item.location,
+          item.isPartialFulfillment ? 'Partial fulfilment' : '',
+        ].filter(Boolean).join(' · '),
+        orderReference,
+        itemSummary: `${item.name} x${item.quantity}`,
+        quantity: Number(item.quantity) || 0,
+        amount: Number(item.lineTotal) || null,
+        method: item.fulfillmentMethod,
+        status: item.fulfillmentStatus,
+        actor: item.fulfilledByEmail || '',
+      });
+    }
+  }
+
+  for (const credit of storeCreditEntries) {
+    const sourceReference = credit.sourceOrder ? formatStatementOrderReference(credit.sourceOrder) : '';
+    const usedReference = credit.order ? formatStatementOrderReference(credit.order) : '';
+    const isCredit = credit.type === 'CREDIT_ISSUED';
+
+    addStatementEntry(entries, {
+      id: `store-credit:${credit.id}`,
+      occurredAt: credit.createdAt,
+      type: credit.type,
+      title: isCredit ? 'Store credit issued' : credit.type === 'CREDIT_USED' ? 'Store credit used' : 'Store credit reversed',
+      details: credit.note || [sourceReference ? `From ${sourceReference}` : '', usedReference ? `Used on ${usedReference}` : ''].filter(Boolean).join(' · '),
+      orderReference: usedReference || sourceReference || null,
+      amount: Math.abs(Number(credit.amount) || 0),
+      balanceImpact: Number(credit.amount) || 0,
+      method: 'STORE_CREDIT',
+      status: credit.type,
+    });
+  }
+
+  return entries.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+}
+
+export async function customerStatementHandler(req, res, next) {
+  try {
+    const { customerId } = customerStatementParamsSchema.parse(req.params);
+
+    const customer = await prisma.user.findUnique({
+      where: { id: customerId },
+      select: {
+        id: true,
+        name: true,
+        title: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        address: true,
+        city: true,
+        province: true,
+        postalCode: true,
+        isActive: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!customer || customer.role !== 'USER') {
+      return res.status(404).json({ message: 'Customer not found.' });
+    }
+
+    const [orders, storeCreditEntries, updateRequests, auditLogs] = await Promise.all([
+      prisma.order.findMany({
+        where: { userId: customerId },
+        orderBy: { createdAt: 'asc' },
+        include: {
+          salesItem: true,
+          payment: true,
+        },
+      }),
+      prisma.storeCreditLedger.findMany({
+        where: { userId: customerId },
+        orderBy: { createdAt: 'asc' },
+        include: {
+          order: {
+            select: {
+              id: true,
+              orderReference: true,
+              displayOrderReference: true,
+              orderSequence: true,
+              createdAt: true,
+              user: { select: { firstName: true, name: true } },
+              salesItem: { select: { batchNumber: true } },
+            },
+          },
+          sourceOrder: {
+            select: {
+              id: true,
+              orderReference: true,
+              displayOrderReference: true,
+              orderSequence: true,
+              createdAt: true,
+              user: { select: { firstName: true, name: true } },
+              salesItem: { select: { batchNumber: true } },
+            },
+          },
+        },
+      }),
+      prisma.customerUpdateRequest.findMany({
+        where: { userId: customerId },
+        orderBy: { createdAt: 'asc' },
+        include: {
+          reviewedBy: {
+            select: {
+              email: true,
+              name: true,
+            },
+          },
+        },
+      }),
+      prisma.customerAuditLog.findMany({
+        where: { userId: customerId },
+        orderBy: { createdAt: 'asc' },
+        include: {
+          changedBy: {
+            select: {
+              email: true,
+              name: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const entries = buildStatementEntries({
+      customer,
+      orders,
+      storeCreditEntries,
+      updateRequests,
+      auditLogs,
+    });
+
+    const storeCreditBalance = storeCreditEntries.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
+    const paidOrders = orders.filter((order) => isOrderPaidLike(order));
+
+    return res.json({
+      customer,
+      summary: {
+        totalOrders: orders.length,
+        paidOrders: paidOrders.length,
+        totalPaidAmount: paidOrders.reduce((sum, order) => sum + (Number(order.totalAmount) || 0), 0),
+        storeCreditBalance,
+        entries: entries.length,
+      },
+      entries,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+function formatCustomerNote(note) {
+  return {
+    id: note.id,
+    userId: note.userId,
+    orderId: note.orderId,
+    orderReferences: Array.isArray(note.orderReferences) ? note.orderReferences : [],
+    orderReference: Array.isArray(note.orderReferences) && note.orderReferences.length
+      ? note.orderReferences.join(', ')
+      : note.order
+      ? getDisplayOrderReference(note.order)
+      : '',
+    source: note.source,
+    note: note.note,
+    messageType: note.messageType,
+    readAt: note.readAt || null,
+    readBy: note.readBy
+      ? {
+          id: note.readBy.id,
+          name: note.readBy.name,
+          email: note.readBy.email,
+        }
+      : null,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+    createdBy: note.createdBy
+      ? {
+          id: note.createdBy.id,
+          name: note.createdBy.name,
+          email: note.createdBy.email,
+        }
+      : null,
+  };
+}
+
+function formatRawCustomerNote(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    orderId: row.order_id,
+    orderReferences: Array.isArray(row.order_references) ? row.order_references : [],
+    orderReference: Array.isArray(row.order_references) && row.order_references.length
+      ? row.order_references.join(', ')
+      : row.order_reference || '',
+    source: row.source,
+    note: row.note,
+    messageType: row.message_type,
+    readAt: row.read_at || null,
+    readBy: row.read_by_user_id
+      ? {
+          id: row.read_by_user_id,
+          name: row.read_by_name,
+          email: row.read_by_email,
+        }
+      : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by_user_id
+      ? {
+          id: row.created_by_user_id,
+          name: row.created_by_name,
+          email: row.created_by_email,
+        }
+      : null,
+  };
+}
+
+async function getCustomerOrderOptions(customerId) {
+  const orders = await prisma.order.findMany({
+    where: { userId: customerId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      orderReference: true,
+      displayOrderReference: true,
+      orderSequence: true,
+      createdAt: true,
+      user: { select: { firstName: true, name: true } },
+      salesItem: { select: { batchNumber: true, name: true } },
+    },
+  });
+
+  return orders.map((order) => ({
+    id: order.id,
+    label: getDisplayOrderReference(order),
+    itemName: order.salesItem?.name || '',
+    batchNumber: order.salesItem?.batchNumber || '',
+    createdAt: order.createdAt,
+  }));
+}
+
+async function findCustomerForAdmin(customerId) {
+  const customer = await prisma.user.findUnique({
+    where: { id: customerId },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      address: true,
+      isActive: true,
+      role: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+
+  if (!customer || customer.role !== 'USER') {
+    return null;
+  }
+
+  return customer;
+}
+
+export async function listCustomerNotesHandler(req, res, next) {
+  try {
+    const { customerId } = customerStatementParamsSchema.parse(req.params);
+    const customer = await findCustomerForAdmin(customerId);
+
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer not found.' });
+    }
+
+    const orderOptions = await getCustomerOrderOptions(customerId);
+    const notes = prisma.customerNote
+      ? await prisma.customerNote.findMany({
+          where: { userId: customerId },
+          orderBy: { createdAt: 'desc' },
+          include: {
+            createdBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+            order: {
+              select: {
+                id: true,
+                orderReference: true,
+                displayOrderReference: true,
+                orderSequence: true,
+                createdAt: true,
+                user: { select: { firstName: true, name: true } },
+                salesItem: { select: { batchNumber: true } },
+              },
+            },
+          },
+        })
+      : await prisma.$queryRaw`
+          SELECT
+            cn.id,
+            cn.user_id,
+            cn.order_id,
+            cn.order_references,
+            COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+            cn.source,
+            cn.note,
+            cn.message_type,
+            cn.read_at,
+            cn.read_by_user_id,
+            reader.name AS read_by_name,
+            reader.email AS read_by_email,
+            cn.created_by_user_id,
+            u.name AS created_by_name,
+            u.email AS created_by_email,
+            cn.created_at,
+            cn.updated_at
+          FROM customer_notes cn
+          LEFT JOIN orders o ON o.id = cn.order_id
+          LEFT JOIN users u ON u.id = cn.created_by_user_id
+          LEFT JOIN users reader ON reader.id = cn.read_by_user_id
+          WHERE cn.user_id = ${customerId}
+          ORDER BY cn.created_at DESC
+        `;
+
+    return res.json({
+      customer,
+      orderOptions,
+      items: notes.map((note) => (prisma.customerNote ? formatCustomerNote(note) : formatRawCustomerNote(note))),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createCustomerNoteHandler(req, res, next) {
+  try {
+    const { customerId } = customerStatementParamsSchema.parse(req.params);
+    const payload = createCustomerNoteSchema.parse(req.body);
+    const customer = await findCustomerForAdmin(customerId);
+
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer not found.' });
+    }
+
+    const orderReference = payload.orderReference?.trim() || '';
+    const requestedOrderIds = [...new Set([
+      ...payload.orderIds,
+      ...(payload.orderId ? [payload.orderId] : []),
+    ])];
+    let orders = [];
+
+    if (requestedOrderIds.length) {
+      orders = await prisma.order.findMany({
+        where: {
+          id: { in: requestedOrderIds },
+          userId: customerId,
+        },
+        select: {
+          id: true,
+          orderReference: true,
+          displayOrderReference: true,
+          orderSequence: true,
+          createdAt: true,
+          user: { select: { firstName: true, name: true } },
+          salesItem: { select: { batchNumber: true } },
+        },
+      });
+
+      if (orders.length !== requestedOrderIds.length) {
+        return res.status(404).json({ message: 'One or more selected orders were not found for this customer.' });
+      }
+
+      orders = requestedOrderIds
+        .map((orderId) => orders.find((entry) => entry.id === orderId))
+        .filter(Boolean);
+    } else if (orderReference) {
+      const order = await prisma.order.findFirst({
+        where: {
+          userId: customerId,
+          OR: [
+            { displayOrderReference: orderReference },
+            { orderReference },
+          ],
+        },
+        select: {
+          id: true,
+          orderReference: true,
+          displayOrderReference: true,
+          orderSequence: true,
+          createdAt: true,
+          user: { select: { firstName: true, name: true } },
+          salesItem: { select: { batchNumber: true } },
+        },
+      });
+
+      if (!order) {
+        return res.status(404).json({ message: 'No matching order found for this customer.' });
+      }
+
+      orders = [order];
+    }
+
+    const primaryOrder = orders[0] || null;
+    const orderReferences = orders.map((order) => getDisplayOrderReference(order)).filter(Boolean);
+
+    const note = prisma.customerNote
+      ? await prisma.customerNote.create({
+          data: {
+            userId: customerId,
+            orderId: primaryOrder?.id || null,
+            orderReferences,
+            source: 'ADMIN',
+            note: payload.note,
+            messageType: payload.messageType?.trim() || null,
+            createdByUserId: req.admin?.userId || null,
+          },
+          include: {
+            createdBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+            order: {
+              select: {
+                id: true,
+                orderReference: true,
+                displayOrderReference: true,
+                orderSequence: true,
+                createdAt: true,
+                user: { select: { firstName: true, name: true } },
+                salesItem: { select: { batchNumber: true } },
+              },
+            },
+          },
+        })
+      : (await prisma.$queryRaw`
+          WITH inserted AS (
+            INSERT INTO customer_notes (
+              user_id,
+              order_id,
+              order_references,
+              source,
+              note,
+              message_type,
+              created_by_user_id
+            )
+            VALUES (
+              ${customerId},
+              ${primaryOrder?.id || null},
+              ${orderReferences},
+              'ADMIN',
+              ${payload.note},
+              ${payload.messageType?.trim() || null},
+              ${req.admin?.userId || null}
+            )
+            RETURNING *
+          )
+          SELECT
+            inserted.id,
+            inserted.user_id,
+            inserted.order_id,
+            inserted.order_references,
+            COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+            inserted.source,
+            inserted.note,
+            inserted.message_type,
+            inserted.created_by_user_id,
+            u.name AS created_by_name,
+            u.email AS created_by_email,
+            inserted.created_at,
+            inserted.updated_at
+          FROM inserted
+          LEFT JOIN orders o ON o.id = inserted.order_id
+          LEFT JOIN users u ON u.id = inserted.created_by_user_id
+        `)[0];
+
+    return res.status(201).json({
+      message: 'Customer note saved successfully.',
+      note: prisma.customerNote ? formatCustomerNote(note) : formatRawCustomerNote(note),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+function formatCustomerNoteNotification(note) {
+  const formatted = prisma.customerNote ? formatCustomerNote(note) : formatRawCustomerNote(note);
+  const customer = note.user || {
+    id: note.user_id,
+    name: note.customer_name,
+    email: note.customer_email,
+    phone: note.customer_phone,
+    isActive: note.customer_is_active,
+  };
+
+  return {
+    ...formatted,
+    customer: {
+      id: customer.id,
+      name: customer.name || '',
+      email: customer.email || '',
+      phone: customer.phone || '',
+      isActive: customer.isActive ?? customer.customer_is_active ?? true,
+    },
+  };
+}
+
+export async function listCustomerNoteNotificationsHandler(req, res, next) {
+  try {
+    const [unreadCount, notes] = await Promise.all([
+      prisma.$queryRaw`
+        SELECT COUNT(*)::int AS count
+        FROM customer_notes
+        WHERE source = 'CUSTOMER'
+          AND read_at IS NULL
+      `,
+      prisma.$queryRaw`
+        SELECT
+          cn.id,
+          cn.user_id,
+          cn.order_id,
+          cn.order_references,
+          COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+          cn.source,
+          cn.note,
+          cn.message_type,
+          cn.read_at,
+          cn.read_by_user_id,
+          reader.name AS read_by_name,
+          reader.email AS read_by_email,
+          cn.created_by_user_id,
+          actor.name AS created_by_name,
+          actor.email AS created_by_email,
+          cn.created_at,
+          cn.updated_at,
+          customer.name AS customer_name,
+          customer.email AS customer_email,
+          customer.phone AS customer_phone,
+          customer.is_active AS customer_is_active
+        FROM customer_notes cn
+        JOIN users customer ON customer.id = cn.user_id
+        LEFT JOIN orders o ON o.id = cn.order_id
+        LEFT JOIN users actor ON actor.id = cn.created_by_user_id
+        LEFT JOIN users reader ON reader.id = cn.read_by_user_id
+        WHERE cn.source = 'CUSTOMER'
+          AND cn.read_at IS NULL
+        ORDER BY cn.created_at DESC
+        LIMIT 20
+      `,
+    ]);
+
+    const count = Array.isArray(unreadCount) ? Number(unreadCount[0]?.count || 0) : Number(unreadCount || 0);
+
+    return res.json({
+      unreadCount: count,
+      items: notes.map((note) => formatCustomerNoteNotification(note)),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function markCustomerNoteNotificationsReadHandler(req, res, next) {
+  try {
+    const payload = markCustomerNoteNotificationsReadSchema.parse(req.body || {});
+    const noteIds = [...new Set(payload.noteIds)];
+    const readAt = new Date();
+    const readByUserId = req.admin?.userId || null;
+
+    const result = noteIds.length
+      ? await prisma.$executeRaw`
+          UPDATE customer_notes
+          SET read_at = ${readAt},
+              read_by_user_id = ${readByUserId},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE source = 'CUSTOMER'
+            AND read_at IS NULL
+            AND id = ANY(${noteIds})
+        `
+      : await prisma.$executeRaw`
+          UPDATE customer_notes
+          SET read_at = ${readAt},
+              read_by_user_id = ${readByUserId},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE source = 'CUSTOMER'
+            AND read_at IS NULL
+        `;
+
+    return res.json({
+      message: `${result} note${result === 1 ? '' : 's'} marked as read.`,
+      markedRead: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function updateCustomerHandler(req, res, next) {
   try {
     const customerId = z.string().uuid().parse(req.params.customerId);
@@ -3207,7 +4126,21 @@ export async function updateCustomerHandler(req, res, next) {
 
     const existingCustomer = await prisma.user.findUnique({
       where: { id: customerId },
-      select: { id: true, role: true, email: true },
+      select: {
+        id: true,
+        role: true,
+        name: true,
+        title: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        address: true,
+        city: true,
+        province: true,
+        postalCode: true,
+        isActive: true,
+      },
     });
 
     if (!existingCustomer || existingCustomer.role !== 'USER') {
@@ -3225,25 +4158,53 @@ export async function updateCustomerHandler(req, res, next) {
       }
     }
 
-    const updatedCustomer = await prisma.user.update({
-      where: { id: customerId },
-      data: {
-        name: payload.name,
-        email: payload.email,
-        phone: payload.phone || null,
-        address: payload.address || null,
-        isActive: payload.isActive,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        address: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true,
-      },
+    const beforeJson = pickCustomerAuditFields(existingCustomer);
+    const updatedCustomer = await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: customerId },
+        data: {
+          name: payload.name,
+          email: payload.email,
+          phone: payload.phone || null,
+          address: payload.address || null,
+          isActive: payload.isActive,
+        },
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          address: true,
+          city: true,
+          province: true,
+          postalCode: true,
+          isActive: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      const afterJson = pickCustomerAuditFields(updated);
+      const changedFields = getCustomerChangedFields(beforeJson, afterJson);
+      if (changedFields.length) {
+        await tx.customerAuditLog.create({
+          data: {
+            userId: customerId,
+            action: 'ADMIN_CUSTOMER_UPDATED',
+            beforeJson,
+            afterJson: {
+              ...afterJson,
+              changedFields,
+            },
+            changedByUserId: req.admin?.userId || null,
+          },
+        });
+      }
+
+      return updated;
     });
 
     return res.json({
@@ -3323,6 +4284,22 @@ export async function approveCustomerUpdateRequestHandler(req, res, next) {
         city: true,
         province: true,
         postalCode: true,
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
+            isActive: true,
+          },
+        },
       },
     });
 
@@ -3334,8 +4311,9 @@ export async function approveCustomerUpdateRequestHandler(req, res, next) {
       return res.status(409).json({ message: 'This customer update request has already been reviewed.' });
     }
 
-    await prisma.$transaction([
-      prisma.user.update({
+    await prisma.$transaction(async (tx) => {
+      const beforeJson = pickCustomerAuditFields(existingRequest.user);
+      const updatedUser = await tx.user.update({
         where: { id: existingRequest.userId },
         data: {
           phone: existingRequest.phone,
@@ -3344,16 +4322,49 @@ export async function approveCustomerUpdateRequestHandler(req, res, next) {
           province: existingRequest.province,
           postalCode: existingRequest.postalCode,
         },
-      }),
-      prisma.customerUpdateRequest.update({
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          address: true,
+          city: true,
+          province: true,
+          postalCode: true,
+          isActive: true,
+        },
+      });
+
+      await tx.customerUpdateRequest.update({
         where: { id: requestId },
         data: {
           status: 'APPROVED',
           reviewedAt: new Date(),
           reviewedByUserId: req.admin.userId,
         },
-      }),
-    ]);
+      });
+
+      const afterJson = pickCustomerAuditFields(updatedUser);
+      const changedFields = getCustomerChangedFields(beforeJson, afterJson);
+      if (changedFields.length) {
+        await tx.customerAuditLog.create({
+          data: {
+            userId: existingRequest.userId,
+            action: 'CUSTOMER_UPDATE_APPROVED',
+            beforeJson,
+            afterJson: {
+              ...afterJson,
+              changedFields,
+              requestId,
+            },
+            changedByUserId: req.admin?.userId || null,
+          },
+        });
+      }
+    });
 
     return res.json({ message: 'Customer update approved successfully.' });
   } catch (error) {
@@ -4392,6 +5403,195 @@ export async function updatePartialFulfillmentHandler(req, res, next) {
             ...updatedOrder,
             fulfillmentItems,
           },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function undoPartialFulfillmentHandler(req, res, next) {
+  try {
+    const orderReference = z.string().uuid().parse(req.params.orderReference);
+    const payload = undoPartialFulfillmentSchema.parse(req.body);
+
+    const order = await prisma.order.findUnique({
+      where: { orderReference },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (!isOrderPaidLike(order)) {
+      return res.status(409).json({ message: 'Only paid orders can be updated for pickup or delivery.' });
+    }
+
+    const snapshot = parseOrderNotes(order.notes);
+    const rawItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
+
+    if (!rawItems.length) {
+      return res.status(409).json({ message: 'Partial fulfilment requires item details.' });
+    }
+
+    const normalizedItems = rawItems.map((item) => {
+      const normalizedItem = {
+        ...item,
+        fulfillmentMethod: item.fulfillmentMethod || order.fulfillmentMethod,
+        fulfillmentStatus: getDefaultItemFulfillmentStatus(order, item),
+      };
+
+      if (normalizedItem.saleType === 'BUNDLE_DISCOUNTED_SALE') {
+        normalizedItem.fulfillmentChildren = buildBundleFulfillmentChildren(order, normalizedItem);
+      }
+
+      return normalizedItem;
+    });
+
+    const flattenedItems = normalizeFulfillmentItems({
+      ...order,
+      notes: JSON.stringify({
+        ...(snapshot || {}),
+        items: normalizedItems,
+      }),
+    });
+    const targetItem = flattenedItems.find((item) => item.itemIndex === payload.itemIndex);
+
+    if (!targetItem) {
+      return res.status(404).json({ message: 'Order item not found.' });
+    }
+
+    if (targetItem.isBundleComponent) {
+      return res.status(409).json({ message: 'Bundle component partial undo is not supported.' });
+    }
+
+    const sourceItem = normalizedItems[targetItem.sourceIndex];
+    const currentPartialFulfillments = getPartialFulfillments(sourceItem);
+
+    if (!currentPartialFulfillments.length) {
+      return res.status(409).json({ message: 'No partial fulfilment found for this item.' });
+    }
+
+    const partialIndexToRemove = targetItem.isPartialFulfillment
+      ? targetItem.partialIndex
+      : currentPartialFulfillments.length - 1;
+
+    if (
+      partialIndexToRemove === undefined ||
+      partialIndexToRemove < 0 ||
+      partialIndexToRemove >= currentPartialFulfillments.length
+    ) {
+      return res.status(404).json({ message: 'Partial fulfilment entry not found.' });
+    }
+
+    const removedPartialFulfillment = currentPartialFulfillments[partialIndexToRemove];
+    const nextPartialFulfillments = currentPartialFulfillments.filter((_, index) => index !== partialIndexToRemove);
+    const originalQuantity = Math.max(0, Number(sourceItem?.quantity) || 0);
+    const nextPartialTotal = nextPartialFulfillments.reduce(
+      (sum, entry) => sum + Math.max(0, Number(entry?.quantity) || 0),
+      0,
+    );
+    const completedStatus = getCompletedStatusForMethod(sourceItem.fulfillmentMethod);
+    const nextItemStatus = nextPartialTotal >= originalQuantity && originalQuantity > 0
+      ? completedStatus
+      : getPendingStatusForMethod(sourceItem.fulfillmentMethod);
+    const nextCompletedPartial = nextPartialFulfillments[nextPartialFulfillments.length - 1] || null;
+    const reversalAudit = {
+      action: 'PARTIAL_FULFILLMENT_UNDONE',
+      sourceIndex: targetItem.sourceIndex,
+      partialIndex: partialIndexToRemove,
+      itemName: sourceItem.name || targetItem.name || null,
+      salesItemId: sourceItem.salesItemId || targetItem.salesItemId || null,
+      batchNumber: sourceItem.batchNumber || targetItem.batchNumber || null,
+      quantity: Math.max(0, Number(removedPartialFulfillment?.quantity) || 0),
+      originalFulfilledAt: removedPartialFulfillment?.fulfilledAt || null,
+      undoneAt: new Date().toISOString(),
+      undoneByUserId: req.admin?.userId || null,
+      undoneByEmail: req.admin?.email || null,
+      undoneByRole: req.admin?.role || null,
+    };
+
+    const nextItems = normalizedItems.map((item, index) => {
+      if (index !== targetItem.sourceIndex) {
+        return item;
+      }
+
+      const nextItem = {
+        ...item,
+        fulfillmentStatus: nextItemStatus,
+        fulfilledAt: nextItemStatus === completedStatus ? nextCompletedPartial?.fulfilledAt || item.fulfilledAt || null : null,
+        fulfilledByUserId: nextItemStatus === completedStatus ? nextCompletedPartial?.fulfilledByUserId || item.fulfilledByUserId || null : null,
+        fulfilledByEmail: nextItemStatus === completedStatus ? nextCompletedPartial?.fulfilledByEmail || item.fulfilledByEmail || null : null,
+        fulfilledByRole: nextItemStatus === completedStatus ? nextCompletedPartial?.fulfilledByRole || item.fulfilledByRole || null : null,
+        partialFulfillments: nextPartialFulfillments,
+      };
+
+      return nextItem;
+    });
+
+    const nextNotes = JSON.stringify({
+      ...(snapshot || {}),
+      items: nextItems,
+      fulfillmentAuditTrail: [
+        ...(Array.isArray(snapshot?.fulfillmentAuditTrail) ? snapshot.fulfillmentAuditTrail : []),
+        reversalAudit,
+      ],
+    });
+    const nextFlattenedItems = normalizeFulfillmentItems({
+      ...order,
+      notes: nextNotes,
+    });
+    const aggregateFulfillmentStatus = deriveAggregateFulfillmentStatus(order, nextFlattenedItems);
+
+    const updatedOrder = await prisma.order.update({
+      where: { orderReference },
+      data: {
+        fulfillmentStatus: aggregateFulfillmentStatus,
+        notes: nextNotes,
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            province: true,
+            postalCode: true,
+          },
+        },
+        salesItem: {
+          select: {
+            id: true,
+            name: true,
+            batchNumber: true,
+            pickupInstructions: true,
+          },
+        },
+        payment: {
+          select: {
+            status: true,
+            providerPayloadJson: true,
+            providerReference: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    const fulfillmentItems = normalizeFulfillmentItems(updatedOrder);
+
+    return res.json({
+      message: 'Partial fulfilment undone successfully.',
+      audit: reversalAudit,
+      order: {
+        ...updatedOrder,
+        fulfillmentItems,
+      },
     });
   } catch (error) {
     next(error);

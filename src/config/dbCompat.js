@@ -21,6 +21,150 @@ export async function ensureDatabaseCompatibility() {
   `);
 
   await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "customer_audit_logs" (
+      "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "user_id" TEXT NOT NULL,
+      "action" TEXT NOT NULL,
+      "before_json" JSONB,
+      "after_json" JSONB,
+      "changed_by_user_id" TEXT,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "customer_audit_logs_pkey" PRIMARY KEY ("id")
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_audit_logs_user_id_idx" ON "customer_audit_logs"("user_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_audit_logs_changed_by_user_id_idx" ON "customer_audit_logs"("changed_by_user_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_audit_logs"
+      ADD CONSTRAINT "customer_audit_logs_user_id_fkey"
+      FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_audit_logs"
+      ADD CONSTRAINT "customer_audit_logs_changed_by_user_id_fkey"
+      FOREIGN KEY ("changed_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "customer_notes" (
+      "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "user_id" TEXT NOT NULL,
+      "order_id" TEXT,
+      "order_references" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+      "source" TEXT NOT NULL DEFAULT 'ADMIN',
+      "note" TEXT NOT NULL,
+      "message_type" TEXT,
+      "created_by_user_id" TEXT,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "customer_notes_pkey" PRIMARY KEY ("id")
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "customer_notes"
+    ADD COLUMN IF NOT EXISTS "order_references" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "customer_notes"
+    ADD COLUMN IF NOT EXISTS "read_at" TIMESTAMP(3);
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "customer_notes"
+    ADD COLUMN IF NOT EXISTS "read_by_user_id" TEXT;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_notes_user_id_idx" ON "customer_notes"("user_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_notes_order_id_idx" ON "customer_notes"("order_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_notes_created_by_user_id_idx" ON "customer_notes"("created_by_user_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_notes_source_read_at_created_at_idx" ON "customer_notes"("source", "read_at", "created_at");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "customer_notes_read_by_user_id_idx" ON "customer_notes"("read_by_user_id");
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_notes"
+      ADD CONSTRAINT "customer_notes_user_id_fkey"
+      FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_notes"
+      ADD CONSTRAINT "customer_notes_order_id_fkey"
+      FOREIGN KEY ("order_id") REFERENCES "orders"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_notes"
+      ADD CONSTRAINT "customer_notes_created_by_user_id_fkey"
+      FOREIGN KEY ("created_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    BEGIN
+      ALTER TABLE "customer_notes"
+      ADD CONSTRAINT "customer_notes_read_by_user_id_fkey"
+      FOREIGN KEY ("read_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$;
+  `);
+
+  await prisma.$executeRawUnsafe(`
     DO $$
     BEGIN
       CREATE TYPE "SalesItemType" AS ENUM ('NORMAL_SALE', 'BUNDLE_DISCOUNTED_SALE');

@@ -27,6 +27,18 @@ const customerUpdateRequestSchema = z.object({
   postalCode: z.preprocess((value) => sanitizeText(value), z.string().min(3).max(20)),
 });
 
+function sanitizeCustomerNote(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/[<>]/g, '');
+}
+
+const customerFeedbackNoteSchema = z.object({
+  email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
+  note: z.preprocess((value) => sanitizeCustomerNote(value), z.string().min(3).max(4000)),
+});
+
 export async function searchCustomersHandler(req, res, next) {
   try {
     const q = sanitizeText(req.query.q || '');
@@ -209,6 +221,59 @@ export async function createCustomerUpdateRequestHandler(req, res, next) {
       ok: true,
       message: 'Update request sent to admin for approval.',
       request,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createCustomerFeedbackNoteHandler(req, res, next) {
+  try {
+    const payload = customerFeedbackNoteSchema.parse(req.body);
+    const customer = await prisma.user.findFirst({
+      where: {
+        role: 'USER',
+        email: { equals: payload.email, mode: 'insensitive' },
+      },
+      select: {
+        id: true,
+        email: true,
+      },
+    });
+
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer record not found for this email address.' });
+    }
+
+    if (prisma.customerNote) {
+      await prisma.customerNote.create({
+        data: {
+          userId: customer.id,
+          source: 'CUSTOMER',
+          note: payload.note,
+          messageType: 'CUSTOMER_FEEDBACK',
+        },
+      });
+    } else {
+      await prisma.$executeRaw`
+        INSERT INTO customer_notes (
+          user_id,
+          source,
+          note,
+          message_type
+        )
+        VALUES (
+          ${customer.id},
+          'CUSTOMER',
+          ${payload.note},
+          'CUSTOMER_FEEDBACK'
+        )
+      `;
+    }
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Your note has been submitted.',
     });
   } catch (error) {
     next(error);
