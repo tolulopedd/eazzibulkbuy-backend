@@ -4,12 +4,12 @@ import { prisma } from '../config/prisma.js';
 
 const listPickupNoticeTemplatesQuerySchema = z.object({
   status: z.enum(['ACTIVE', 'INACTIVE', 'ALL']).default('ALL'),
-  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER']).optional(),
+  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER', 'DELIVERY_NOTICE']).optional(),
 });
 
 const pickupNoticeTemplatePayloadSchema = z.object({
   name: z.string().trim().min(2).max(140),
-  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER']).optional(),
+  templateType: z.enum(['PICKUP_NOTICE', 'PICKUP_REMINDER', 'DELIVERY_NOTICE']).optional(),
   address: z.string().trim().min(3).max(255),
   readyDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   timeWindow: z.string().trim().min(3).max(120),

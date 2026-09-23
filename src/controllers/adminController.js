@@ -68,6 +68,29 @@ function isOrderPendingPaymentForOverview(order) {
   return ['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW'].includes(order?.paymentStatus);
 }
 
+function buildCustomerListWhere(query = {}) {
+  const orderRelationFilter = query.batchNumber
+    ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } }
+    : {};
+
+  return {
+    role: 'USER',
+    ...(query.hasOrders === true ? { orders: { some: orderRelationFilter } } : {}),
+    ...(query.hasOrders === false ? { orders: { none: orderRelationFilter } } : {}),
+    ...(query.hasOrders === undefined && query.batchNumber ? { orders: { some: orderRelationFilter } } : {}),
+    ...(query.q
+      ? {
+          OR: [
+            { name: { contains: query.q, mode: 'insensitive' } },
+            { email: { contains: query.q, mode: 'insensitive' } },
+            { phone: { contains: query.q } },
+            { address: { contains: query.q, mode: 'insensitive' } },
+          ],
+        }
+      : {}),
+  };
+}
+
 function escapeCsv(value) {
   const stringValue = String(value ?? '');
   if (/[",\n]/.test(stringValue)) {
@@ -694,11 +717,16 @@ function orderItemMatchesReportFilters(item, query) {
     return false;
   }
 
-  if (
-    query.pickupLocation &&
-    !normalizePickupLocationText(item.preferredPickupLocation).includes(normalizePickupLocationText(query.pickupLocation))
-  ) {
-    return false;
+  if (query.pickupLocation) {
+    const normalizedPickupLocation = normalizePickupLocationText(query.pickupLocation);
+    const normalizedPreferredPickupLocation = normalizePickupLocationText(item.preferredPickupLocation);
+    const normalizedItemLocation = normalizePickupLocationText(item.location);
+    if (
+      !normalizedPreferredPickupLocation.includes(normalizedPickupLocation) &&
+      !normalizedItemLocation.includes(normalizedPickupLocation)
+    ) {
+      return false;
+    }
   }
 
   return true;
@@ -848,9 +876,11 @@ function buildPaidBatchSalesComparison(paidOrders) {
 }
 
 function getFulfillmentLocationName(item) {
-  const location = item.fulfillmentMethod === 'PICKUP'
-    ? item.preferredPickupLocation || item.location
-    : item.location || 'Delivery';
+  if (item.fulfillmentMethod === 'DELIVERY') {
+    return 'Delivery';
+  }
+
+  const location = item.preferredPickupLocation || item.location;
 
   return String(location || '').trim() || 'Location not set';
 }
@@ -1065,7 +1095,9 @@ const markCustomerNoteNotificationsReadSchema = z.object({
 });
 
 const sendGeneralNoticesSchema = z.object({
-  customerIds: z.array(z.string().uuid()).min(1).max(200),
+  customerIds: z.array(z.string().uuid()).max(200).optional().default([]),
+  selectAllMatching: z.coerce.boolean().optional().default(false),
+  q: z.string().trim().max(120).optional(),
   subject: z.string().trim().min(3).max(160),
   message: z.string().trim().min(1).max(4000),
 });
@@ -1215,7 +1247,7 @@ const adminReportsQuerySchema = z.object({
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
   reportType: z
-    .enum(['orderReady', 'supplierOrders', 'salesDetails', 'fulfilledOrders', 'fulfillmentByProduct', 'allocatedPendingFulfillment'])
+    .enum(['orderReady', 'supplierOrders', 'salesDetails', 'fulfilledOrders', 'fulfillmentByProduct', 'allocatedPendingFulfillment', 'pendingFulfillment'])
     .default('orderReady'),
 });
 
@@ -1262,6 +1294,7 @@ const previewPickupAllocationSchema = z.object({
     batchNumber: z.string().trim().max(120).optional(),
     location: z.string().trim().max(255).optional(),
     noticeStatus: z.enum(['NOT_SENT', 'SENT']).or(z.literal('')).optional(),
+    fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   }).optional(),
 });
 
@@ -1272,6 +1305,7 @@ const pickupAllocationPendingSummaryQuerySchema = z.object({
   batchNumber: z.string().trim().max(120).optional(),
   location: z.string().trim().max(255).optional(),
   noticeStatus: z.enum(['NOT_SENT', 'SENT']).or(z.literal('')).optional(),
+  fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
 });
 
 const updatePreferredPickupLocationSchema = z.object({
@@ -1884,6 +1918,36 @@ async function buildAdminReportsData(query) {
         }))
     );
 
+    const pendingFulfillmentRows = paidOrders.flatMap((order) =>
+      order.reportItemDetails
+        .filter((item) => !isCompletedFulfillmentItem(item))
+        .map((item) => ({
+          id: [
+            order.id,
+            item.sourceIndex ?? 'order',
+            item.bundleItemIndex ?? 'item',
+            'pending',
+          ].join(':'),
+          orderReference: order.orderReference,
+          displayOrderReference: order.displayOrderReference,
+          batchNumber: item.batchNumber || order.salesItem?.batchNumber || '',
+          itemName: item.name,
+          quantity: item.quantity,
+          buyerName: order.user?.name || 'Unknown buyer',
+          buyerEmail: order.user?.email || '',
+          buyerPhone: order.user?.phone || '',
+          fulfillmentMethod: item.fulfillmentMethod,
+          fulfillmentStatus: item.fulfillmentStatus,
+          fulfillmentStatusLabel: item.fulfillmentStatusLabel,
+          preferredPickupLocation: formatShortReportLocation(item.preferredPickupLocation),
+          pickupAddress: formatShortReportLocation(item.pickupNotice?.address),
+          readyDate: item.pickupNotice?.readyDate || '',
+          timeWindow: item.pickupNotice?.timeWindow || '',
+          noticeSentAt: item.pickupNotice?.sentAt || null,
+          templateName: item.pickupNotice?.templateName || '',
+        }))
+    );
+
     const fulfillmentProductAggregation = new Map();
     for (const order of paidOrders) {
       for (const item of order.reportItemDetails) {
@@ -2006,6 +2070,7 @@ async function buildAdminReportsData(query) {
       salesDetailRows,
       fulfilledOrderRows,
       allocatedPendingFulfillmentRows,
+      pendingFulfillmentRows,
       fulfillmentByProductRows,
     };
 }
@@ -2268,10 +2333,12 @@ function sortPickupAllocationCandidates(left, right) {
 export async function previewPickupAllocationHandler(req, res, next) {
   try {
     const payload = previewPickupAllocationSchema.parse(req.body);
+    const allocationMethod = payload.filters?.fulfillmentMethod === 'DELIVERY' ? 'DELIVERY' : 'PICKUP';
+    const allocationStatus = allocationMethod === 'DELIVERY' ? 'PENDING_DELIVERY' : 'PENDING_PICKUP';
     const { rows, filterOptions } = await buildPickupNoticeRows({
       ...(payload.filters || {}),
-      fulfillmentMethod: 'PICKUP',
-      fulfillmentStatus: 'PENDING_PICKUP',
+      fulfillmentMethod: allocationMethod,
+      fulfillmentStatus: allocationStatus,
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
@@ -2395,10 +2462,12 @@ export async function previewPickupAllocationHandler(req, res, next) {
 export async function pickupAllocationPendingSummaryHandler(req, res, next) {
   try {
     const query = pickupAllocationPendingSummaryQuerySchema.parse(req.query);
+    const allocationMethod = query.fulfillmentMethod === 'DELIVERY' ? 'DELIVERY' : 'PICKUP';
+    const allocationStatus = allocationMethod === 'DELIVERY' ? 'PENDING_DELIVERY' : 'PENDING_PICKUP';
     const { rows } = await buildPickupNoticeRows({
       ...query,
-      fulfillmentMethod: 'PICKUP',
-      fulfillmentStatus: 'PENDING_PICKUP',
+      fulfillmentMethod: allocationMethod,
+      fulfillmentStatus: allocationStatus,
       sortBy: 'paidAt',
       sortOrder: 'asc',
       page: 1,
@@ -2655,17 +2724,20 @@ export async function sendPickupNoticesHandler(req, res, next) {
         orderReference,
         displayOrderReference,
         itemsSummary,
+        fulfillmentMethod: selectedRows[0]?.fulfillmentMethod || order.fulfillmentMethod,
         channelResults,
         sentSuccessfully,
       });
     }
 
     const sentCount = results.filter((entry) => entry.sentSuccessfully).length;
+    const sentMethods = new Set(results.filter((entry) => entry.sentSuccessfully).map((entry) => entry.fulfillmentMethod));
+    const noticeLabel = sentMethods.size === 1 && sentMethods.has('DELIVERY') ? 'Delivery notice' : 'Pickup notice';
 
     return res.json({
       message: sentCount
-        ? `Pickup notice sent for ${sentCount} order${sentCount === 1 ? '' : 's'}.`
-        : 'No pickup notices were sent. Check channel availability or buyer contact details.',
+        ? `${noticeLabel} sent for ${sentCount} order${sentCount === 1 ? '' : 's'}.`
+        : `No ${noticeLabel.toLowerCase()}s were sent. Check channel availability or buyer contact details.`,
       results,
     });
   } catch (error) {
@@ -2676,12 +2748,20 @@ export async function sendPickupNoticesHandler(req, res, next) {
 export async function sendGeneralNoticesHandler(req, res, next) {
   try {
     const payload = sendGeneralNoticesSchema.parse(req.body);
-    const customerIds = [...new Set(payload.customerIds)];
+    const customerIds = [...new Set(payload.customerIds || [])];
+    if (!payload.selectAllMatching && customerIds.length === 0) {
+      return res.status(400).json({ message: 'Select at least one customer.' });
+    }
+
     const customers = await prisma.user.findMany({
-      where: {
-        id: { in: customerIds },
-        role: 'USER',
-      },
+      where: payload.selectAllMatching
+        ? buildCustomerListWhere({ q: payload.q })
+        : {
+            id: { in: customerIds },
+            role: 'USER',
+          },
+      orderBy: { updatedAt: 'desc' },
+      take: payload.selectAllMatching ? 5000 : undefined,
       select: {
         id: true,
         name: true,
@@ -2691,9 +2771,11 @@ export async function sendGeneralNoticesHandler(req, res, next) {
     });
 
     const customerById = new Map(customers.map((customer) => [customer.id, customer]));
-    const orderedCustomers = customerIds
-      .map((customerId) => customerById.get(customerId))
-      .filter(Boolean);
+    const orderedCustomers = payload.selectAllMatching
+      ? customers
+      : customerIds
+          .map((customerId) => customerById.get(customerId))
+          .filter(Boolean);
     const results = [];
 
     for (const customer of orderedCustomers) {
@@ -2766,6 +2848,8 @@ export async function exportReportsHandler(req, res, next) {
             ? reports.fulfilledOrderRows || []
             : reportType === 'allocatedPendingFulfillment'
               ? reports.allocatedPendingFulfillmentRows || []
+              : reportType === 'pendingFulfillment'
+                ? reports.pendingFulfillmentRows || []
               : reportType === 'fulfillmentByProduct'
                 ? reports.fulfillmentByProductRows || []
                 : reports.orderReadyRows || [];
@@ -2802,9 +2886,9 @@ export async function exportReportsHandler(req, res, next) {
                 ['Fulfilled By', (row) => row.fulfilledByEmail],
                 ['Fulfilled By Role', (row) => row.fulfilledByRole],
                 ['Total Amount (CAD)', (row) => ((row.totalAmount || 0) / 100).toFixed(2)],
-              ]
-            : reportType === 'allocatedPendingFulfillment'
-              ? [
+                ]
+              : reportType === 'allocatedPendingFulfillment'
+                ? [
                   ['Order No', (row) => row.displayOrderReference],
                   ['Batch No', (row) => row.batchNumber],
                   ['Item', (row) => row.itemName],
@@ -2821,9 +2905,27 @@ export async function exportReportsHandler(req, res, next) {
                   ['Notice Sent At', (row) => row.noticeSentAt],
                   ['Template', (row) => row.templateName],
                 ]
-              : reportType === 'fulfillmentByProduct'
-                ? [
-                  ['Product', (row) => row.itemName],
+                : reportType === 'pendingFulfillment'
+                  ? [
+                    ['Order No', (row) => row.displayOrderReference],
+                    ['Batch No', (row) => row.batchNumber],
+                    ['Item', (row) => row.itemName],
+                    ['Qty', (row) => row.quantity],
+                    ['Buyer', (row) => row.buyerName],
+                    ['Email', (row) => row.buyerEmail],
+                    ['Phone', (row) => row.buyerPhone],
+                    ['Method', (row) => row.fulfillmentMethod],
+                    ['Status', (row) => row.fulfillmentStatusLabel],
+                    ['Pickup Location', (row) => row.preferredPickupLocation],
+                    ['Pickup Address', (row) => row.pickupAddress],
+                    ['Ready Date', (row) => row.readyDate],
+                    ['Time Window', (row) => row.timeWindow],
+                    ['Notice Sent At', (row) => row.noticeSentAt],
+                    ['Template', (row) => row.templateName],
+                  ]
+                : reportType === 'fulfillmentByProduct'
+                  ? [
+                    ['Product', (row) => row.itemName],
                   ['Batch No', (row) => row.batchNumber],
                   ['Location', (row) => row.location],
                   ['Method', (row) => row.fulfillmentMethod],
@@ -2854,6 +2956,8 @@ export async function exportReportsHandler(req, res, next) {
             ? 'fulfilled-orders-report'
             : reportType === 'allocatedPendingFulfillment'
               ? 'allocated-pending-fulfillment-report'
+              : reportType === 'pendingFulfillment'
+                ? 'pending-fulfillment-report'
               : reportType === 'fulfillmentByProduct'
                 ? 'fulfillment-by-product-report'
                 : 'order-ready-paid-report';
@@ -3131,26 +3235,7 @@ export async function listCustomersHandler(req, res, next) {
   try {
     const query = listCustomersQuerySchema.parse(req.query);
     const isFulfillmentStaff = req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin;
-    const orderRelationFilter = query.batchNumber
-      ? { salesItem: { batchNumber: { contains: query.batchNumber, mode: 'insensitive' } } }
-      : {};
-
-    const where = {
-      role: 'USER',
-      ...(query.hasOrders === true ? { orders: { some: orderRelationFilter } } : {}),
-      ...(query.hasOrders === false ? { orders: { none: orderRelationFilter } } : {}),
-      ...(query.hasOrders === undefined && query.batchNumber ? { orders: { some: orderRelationFilter } } : {}),
-      ...(query.q
-        ? {
-            OR: [
-              { name: { contains: query.q, mode: 'insensitive' } },
-              { email: { contains: query.q, mode: 'insensitive' } },
-              { phone: { contains: query.q } },
-              { address: { contains: query.q, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
-    };
+    const where = buildCustomerListWhere(query);
 
     const skip = (query.page - 1) * query.limit;
     const [users, total] = await Promise.all([
