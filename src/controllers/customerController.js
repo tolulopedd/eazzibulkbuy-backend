@@ -36,7 +36,13 @@ function sanitizeCustomerNote(value) {
 
 const customerFeedbackNoteSchema = z.object({
   email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
-  note: z.preprocess((value) => sanitizeCustomerNote(value), z.string().min(3).max(4000)),
+  note: z.preprocess(
+    (value) => sanitizeCustomerNote(value),
+    z.string()
+      .min(3)
+      .max(4000)
+      .refine((value) => value.trim().split(/\s+/).filter(Boolean).length <= 150, 'Note must not be more than 150 words.')
+  ),
 });
 
 export async function searchCustomersHandler(req, res, next) {
