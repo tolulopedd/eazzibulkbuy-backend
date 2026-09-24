@@ -1477,17 +1477,12 @@ export async function updateSalesItemHandler(req, res, next) {
       return res.status(404).json({ message: 'Sales item not found.' });
     }
 
-    if (existingItem.status !== 'ACTIVE' || new Date() >= existingItem.closingDate) {
-      return res.status(409).json({
-        message: 'Inactive or expired sales cannot be edited.',
-      });
-    }
-
     const nextStatus = payload.status ?? existingItem.status;
     const nextBatchNumber = payload.batchNumber ?? existingItem.batchNumber;
-    const willRemainActive = nextStatus === 'ACTIVE' && new Date(existingItem.closingDate) > new Date();
+    const nextClosingDate = payload.closingDate ? new Date(payload.closingDate) : existingItem.closingDate;
+    const willBeActive = nextStatus === 'ACTIVE' && nextClosingDate > new Date();
 
-    if (willRemainActive) {
+    if (willBeActive) {
       const conflictingItem = await findConflictingActiveBatchNumber(nextBatchNumber, salesItemId);
       if (conflictingItem) {
         return res.status(409).json({
