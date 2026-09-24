@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { getDisplayOrderReference } from '../utils/orderReference.js';
 import {
@@ -1092,6 +1093,18 @@ const createCustomerNoteSchema = z.object({
 
 const markCustomerNoteNotificationsReadSchema = z.object({
   noteIds: z.array(z.string().uuid()).max(100).optional().default([]),
+});
+
+const listCustomerMessagesQuerySchema = z.object({
+  q: z.string().trim().max(120).optional().default(''),
+  status: z.enum(['', 'UNREAD', 'READ']).optional().default(''),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+const replyCustomerMessageSchema = z.object({
+  subject: z.string().trim().min(3).max(160),
+  message: z.string().trim().min(1).max(4000),
 });
 
 const sendGeneralNoticesSchema = z.object({
@@ -4112,6 +4125,225 @@ function formatCustomerNoteNotification(note) {
       isActive: customer.isActive ?? customer.customer_is_active ?? true,
     },
   };
+}
+
+function formatCustomerMessage(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    orderId: row.order_id,
+    orderReferences: Array.isArray(row.order_references) ? row.order_references : [],
+    orderReference: Array.isArray(row.order_references) && row.order_references.length
+      ? row.order_references.join(', ')
+      : row.order_reference || '',
+    source: row.source,
+    note: row.note,
+    messageType: row.message_type,
+    readAt: row.read_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by_user_id
+      ? {
+          id: row.created_by_user_id,
+          name: row.created_by_name,
+          email: row.created_by_email,
+        }
+      : null,
+    customer: {
+      id: row.customer_id || row.user_id,
+      name: row.customer_name || '',
+      email: row.customer_email || '',
+      phone: row.customer_phone || '',
+      isActive: row.customer_is_active ?? true,
+    },
+  };
+}
+
+export async function listCustomerMessagesHandler(req, res, next) {
+  try {
+    const query = listCustomerMessagesQuerySchema.parse(req.query);
+    const page = query.page;
+    const limit = query.limit;
+    const offset = (page - 1) * limit;
+    const search = query.q.trim();
+
+    const whereSql = Prisma.sql`
+      cn.source = 'CUSTOMER'
+      ${query.status === 'UNREAD' ? Prisma.sql`AND cn.read_at IS NULL` : Prisma.empty}
+      ${query.status === 'READ' ? Prisma.sql`AND cn.read_at IS NOT NULL` : Prisma.empty}
+      ${search
+        ? Prisma.sql`AND (
+            customer.name ILIKE ${`%${search}%`}
+            OR customer.email ILIKE ${`%${search}%`}
+            OR customer.phone ILIKE ${`%${search}%`}
+            OR cn.note ILIKE ${`%${search}%`}
+            OR COALESCE(o.display_order_reference, o.order_reference) ILIKE ${`%${search}%`}
+          )`
+        : Prisma.empty}
+    `;
+
+    const [countRows, rows] = await Promise.all([
+      prisma.$queryRaw`
+        SELECT COUNT(*)::int AS count
+        FROM customer_notes cn
+        JOIN users customer ON customer.id = cn.user_id
+        LEFT JOIN orders o ON o.id = cn.order_id
+        WHERE ${whereSql}
+      `,
+      prisma.$queryRaw`
+        SELECT
+          cn.id,
+          cn.user_id,
+          cn.order_id,
+          cn.order_references,
+          COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+          cn.source,
+          cn.note,
+          cn.message_type,
+          cn.read_at,
+          cn.created_by_user_id,
+          actor.name AS created_by_name,
+          actor.email AS created_by_email,
+          cn.created_at,
+          cn.updated_at,
+          customer.id AS customer_id,
+          customer.name AS customer_name,
+          customer.email AS customer_email,
+          customer.phone AS customer_phone,
+          customer.is_active AS customer_is_active
+        FROM customer_notes cn
+        JOIN users customer ON customer.id = cn.user_id
+        LEFT JOIN orders o ON o.id = cn.order_id
+        LEFT JOIN users actor ON actor.id = cn.created_by_user_id
+        WHERE ${whereSql}
+        ORDER BY cn.created_at DESC
+        LIMIT ${limit}
+        OFFSET ${offset}
+      `,
+    ]);
+
+    const total = Number(countRows?.[0]?.count || 0);
+
+    return res.json({
+      items: rows.map((row) => formatCustomerMessage(row)),
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function replyCustomerMessageHandler(req, res, next) {
+  try {
+    const noteId = z.string().uuid().parse(req.params.noteId);
+    const payload = replyCustomerMessageSchema.parse(req.body);
+
+    const messageRows = await prisma.$queryRaw`
+      SELECT
+        cn.id,
+        cn.user_id,
+        cn.order_id,
+        cn.order_references,
+        COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+        cn.note,
+        cn.message_type,
+        customer.name AS customer_name,
+        customer.email AS customer_email
+      FROM customer_notes cn
+      JOIN users customer ON customer.id = cn.user_id
+      LEFT JOIN orders o ON o.id = cn.order_id
+      WHERE cn.id = ${noteId}
+        AND cn.source = 'CUSTOMER'
+      LIMIT 1
+    `;
+    const message = messageRows?.[0];
+
+    if (!message) {
+      return res.status(404).json({ message: 'Customer message not found.' });
+    }
+
+    await sendMail({
+      to: message.customer_email,
+      subject: payload.subject,
+      text: [
+        `Hello ${String(message.customer_name || 'Customer').split(/\s+/)[0]},`,
+        '',
+        payload.message,
+        '',
+        'Regards,',
+        'EazziBulkBuy.',
+      ].join('\n'),
+      feedbackEmail: message.customer_email,
+    });
+
+    const readAt = new Date();
+    const readByUserId = req.admin?.userId || null;
+    await prisma.$executeRaw`
+      UPDATE customer_notes
+      SET read_at = COALESCE(read_at, ${readAt}),
+          read_by_user_id = COALESCE(read_by_user_id, ${readByUserId}),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${noteId}
+    `;
+
+    const insertedRows = await prisma.$queryRaw`
+      WITH inserted AS (
+        INSERT INTO customer_notes (
+          user_id,
+          order_id,
+          order_references,
+          source,
+          note,
+          message_type,
+          created_by_user_id
+        )
+        VALUES (
+          ${message.user_id},
+          ${message.order_id || null},
+          ${Array.isArray(message.order_references) ? message.order_references : []},
+          'ADMIN',
+          ${payload.message},
+          'MESSAGE_REPLY',
+          ${readByUserId}
+        )
+        RETURNING *
+      )
+      SELECT
+        inserted.id,
+        inserted.user_id,
+        inserted.order_id,
+        inserted.order_references,
+        COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+        inserted.source,
+        inserted.note,
+        inserted.message_type,
+        inserted.read_at,
+        inserted.created_by_user_id,
+        actor.name AS created_by_name,
+        actor.email AS created_by_email,
+        inserted.created_at,
+        inserted.updated_at,
+        customer.id AS customer_id,
+        customer.name AS customer_name,
+        customer.email AS customer_email,
+        customer.phone AS customer_phone,
+        customer.is_active AS customer_is_active
+      FROM inserted
+      JOIN users customer ON customer.id = inserted.user_id
+      LEFT JOIN orders o ON o.id = inserted.order_id
+      LEFT JOIN users actor ON actor.id = inserted.created_by_user_id
+    `;
+
+    return res.status(201).json({
+      message: 'Reply sent successfully.',
+      reply: insertedRows?.[0] ? formatCustomerMessage(insertedRows[0]) : null,
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function listCustomerNoteNotificationsHandler(req, res, next) {

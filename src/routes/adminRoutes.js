@@ -32,6 +32,8 @@ import {
   exportCustomersHandler,
   listCustomerNotesHandler,
   createCustomerNoteHandler,
+  listCustomerMessagesHandler,
+  replyCustomerMessageHandler,
   listCustomerNoteNotificationsHandler,
   markCustomerNoteNotificationsReadHandler,
   listDiscountOrdersHandler,
@@ -87,6 +89,8 @@ router.get('/customers/export', requireAdminRoles('ADMIN', 'SUPERADMIN'), export
 router.get('/customers/:customerId/statement', requireAdminRoles('ADMIN', 'SUPERADMIN'), customerStatementHandler);
 router.get('/customers/:customerId/notes', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomerNotesHandler);
 router.post('/customers/:customerId/notes', requireAdminRoles('ADMIN', 'SUPERADMIN'), createCustomerNoteHandler);
+router.get('/customer-messages', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomerMessagesHandler);
+router.post('/customer-messages/:noteId/reply', requireAdminRoles('ADMIN', 'SUPERADMIN'), replyCustomerMessageHandler);
 router.get('/customer-note-notifications', requireAdminRoles('ADMIN', 'SUPERADMIN'), listCustomerNoteNotificationsHandler);
 router.post('/customer-note-notifications/read', requireAdminRoles('ADMIN', 'SUPERADMIN'), markCustomerNoteNotificationsReadHandler);
 router.post('/customers', requireAdminRoles('ADMIN', 'SUPERADMIN'), createAdminCustomerHandler);
