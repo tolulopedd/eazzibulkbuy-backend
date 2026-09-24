@@ -79,7 +79,14 @@ function appendCustomerFeedbackLink({ text, html, feedbackEmail }) {
 
   return {
     text: `${text || ''}${feedbackText}`,
-    html: html ? `${html}${feedbackHtml}` : html,
+    html: html
+      ? `${html}${feedbackHtml}`
+      : `
+        <div style="font-family:Arial,Helvetica,sans-serif; color:#0f172a; font-size:16px; line-height:1.7;">
+          ${renderTextAsHtml(text || '')}
+          ${feedbackHtml}
+        </div>
+      `,
   };
 }
 
