@@ -1325,6 +1325,12 @@ const updatePreferredPickupLocationSchema = z.object({
   preferredPickupLocation: z.string().trim().min(2).max(180),
 });
 
+const updateOrderFulfillmentMethodSchema = z.object({
+  fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']),
+  preferredPickupLocation: z.string().trim().min(2).max(180).nullable().optional(),
+  reason: z.string().trim().min(3).max(500),
+});
+
 const partialFulfillmentSchema = z.object({
   itemIndex: z.number().int().min(0),
   quantity: z.coerce.number().int().min(1).max(100000),
@@ -4263,14 +4269,7 @@ export async function replyCustomerMessageHandler(req, res, next) {
     await sendMail({
       to: message.customer_email,
       subject: payload.subject,
-      text: [
-        `Hello ${String(message.customer_name || 'Customer').split(/\s+/)[0]},`,
-        '',
-        payload.message,
-        '',
-        'Regards,',
-        'EazziBulkBuy.',
-      ].join('\n'),
+      text: payload.message,
       feedbackEmail: message.customer_email,
     });
 
@@ -4994,6 +4993,269 @@ export async function updatePreferredPickupLocationHandler(req, res, next) {
         ...updatedOrder,
         displayOrderReference: getDisplayOrderReference(updatedOrder),
         fulfillmentItems: normalizeFulfillmentItems(updatedOrder),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateOrderFulfillmentMethodHandler(req, res, next) {
+  try {
+    const orderReference = z.string().uuid().parse(req.params.orderReference);
+    const payload = updateOrderFulfillmentMethodSchema.parse(req.body);
+    const nextPickupLocation = payload.fulfillmentMethod === 'PICKUP'
+      ? payload.preferredPickupLocation || ''
+      : null;
+
+    if (payload.fulfillmentMethod === 'PICKUP') {
+      if (!nextPickupLocation) {
+        return res.status(400).json({ message: 'Select a preferred pickup location for a pickup order.' });
+      }
+
+      const isActivePickupLocation = await hasActivePickupLocation(nextPickupLocation);
+      if (!isActivePickupLocation) {
+        return res.status(409).json({ message: 'Selected pickup location is no longer active.' });
+      }
+    }
+
+    const outcome = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { orderReference },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              title: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              address: true,
+              city: true,
+              province: true,
+              postalCode: true,
+            },
+          },
+          salesItem: {
+            select: {
+              id: true,
+              name: true,
+              batchNumber: true,
+              pickupInstructions: true,
+            },
+          },
+          payment: {
+            select: {
+              status: true,
+              providerPayloadJson: true,
+              providerReference: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        return { status: 404, message: 'Order not found.' };
+      }
+
+      if (order.status === 'CANCELLED') {
+        return { status: 409, message: 'Cancelled orders cannot have their pickup or delivery method changed.' };
+      }
+
+      const snapshot = parseOrderNotes(order.notes) || {};
+      const sourceItems = Array.isArray(snapshot.items) ? snapshot.items : [buildFallbackSnapshotItem(order)];
+      const activeItems = sourceItems.filter((item) => !isResolvedSnapshotItem(item));
+
+      if (!activeItems.length) {
+        return { status: 409, message: 'This order has no active items available for fulfillment.' };
+      }
+
+      const fulfillmentHasStarted = activeItems.some((item) => {
+        const children = Array.isArray(item.fulfillmentChildren) ? item.fulfillmentChildren : [];
+        return isCompletedFulfillmentItem(item)
+          || Boolean(item.fulfilledAt)
+          || getPartialFulfillments(item).length > 0
+          || children.some((child) => (
+            isCompletedFulfillmentItem(child)
+            || Boolean(child.fulfilledAt)
+            || getPartialFulfillments(child).length > 0
+          ));
+      });
+
+      if (fulfillmentHasStarted || ['PICKED_UP', 'DELIVERED'].includes(order.fulfillmentStatus)) {
+        return { status: 409, message: 'Pickup or delivery cannot be changed after fulfillment has started.' };
+      }
+
+      if (payload.fulfillmentMethod === 'DELIVERY') {
+        const missingAddressFields = ['address', 'city', 'province', 'postalCode']
+          .filter((field) => !String(order.user?.[field] || '').trim());
+        if (missingAddressFields.length) {
+          return {
+            status: 409,
+            message: 'Add a complete customer delivery address before changing this order to delivery.',
+          };
+        }
+      }
+
+      if (
+        order.fulfillmentMethod === payload.fulfillmentMethod
+        && (order.preferredPickupLocation || null) === nextPickupLocation
+      ) {
+        return { status: 409, message: 'The order already uses these pickup or delivery details.' };
+      }
+
+      const changedAt = new Date().toISOString();
+      const pendingStatus = getPendingStatusForMethod(payload.fulfillmentMethod);
+      let noticeReset = false;
+
+      const updateFulfillmentEntity = (entity) => {
+        const currentNotice = entity?.pickupNotice;
+        const existingNoticeHistory = Array.isArray(entity?.fulfillmentNoticeHistory)
+          ? entity.fulfillmentNoticeHistory
+          : [];
+        if (currentNotice?.sentAt) {
+          noticeReset = true;
+        }
+
+        return {
+          ...entity,
+          fulfillmentMethod: payload.fulfillmentMethod,
+          fulfillmentStatus: pendingStatus,
+          preferredPickupLocation: nextPickupLocation,
+          fulfilledAt: null,
+          fulfilledByUserId: null,
+          fulfilledByEmail: null,
+          fulfilledByRole: null,
+          ...(currentNotice
+            ? {
+                fulfillmentNoticeHistory: [
+                  ...existingNoticeHistory,
+                  {
+                    ...currentNotice,
+                    supersededAt: changedAt,
+                    supersededReason: 'FULFILLMENT_METHOD_CHANGED',
+                  },
+                ],
+                pickupNotice: null,
+              }
+            : {}),
+        };
+      };
+
+      const nextItems = sourceItems.map((item) => {
+        if (isResolvedSnapshotItem(item)) {
+          return item;
+        }
+
+        const nextItem = updateFulfillmentEntity(item);
+        return {
+          ...nextItem,
+          fulfillmentChildren: Array.isArray(item.fulfillmentChildren)
+            ? item.fulfillmentChildren.map(updateFulfillmentEntity)
+            : item.fulfillmentChildren,
+        };
+      });
+
+      const fulfillmentMethodHistory = Array.isArray(snapshot.fulfillmentMethodHistory)
+        ? snapshot.fulfillmentMethodHistory
+        : [];
+      const nextNotes = {
+        ...snapshot,
+        fulfillmentMethod: payload.fulfillmentMethod,
+        fulfillmentStatus: pendingStatus,
+        preferredPickupLocation: nextPickupLocation,
+        items: nextItems,
+        fulfillmentMethodHistory: [
+          ...fulfillmentMethodHistory,
+          {
+            previousMethod: order.fulfillmentMethod,
+            nextMethod: payload.fulfillmentMethod,
+            previousPickupLocation: order.preferredPickupLocation || null,
+            nextPickupLocation,
+            reason: payload.reason,
+            changedAt,
+            changedByUserId: req.admin?.userId || null,
+            changedByEmail: req.admin?.email || null,
+            changedByRole: req.admin?.role || null,
+          },
+        ],
+      };
+
+      const updateResult = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          updatedAt: order.updatedAt,
+          fulfillmentStatus: order.fulfillmentStatus,
+        },
+        data: {
+          fulfillmentMethod: payload.fulfillmentMethod,
+          fulfillmentStatus: pendingStatus,
+          preferredPickupLocation: nextPickupLocation,
+          notes: JSON.stringify(nextNotes),
+        },
+      });
+
+      if (updateResult.count !== 1) {
+        return {
+          status: 409,
+          message: 'This order changed while you were editing it. Reopen Payment details and try again.',
+        };
+      }
+
+      const updatedOrder = await tx.order.findUnique({
+        where: { id: order.id },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              title: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              address: true,
+              city: true,
+              province: true,
+              postalCode: true,
+            },
+          },
+          salesItem: {
+            select: {
+              id: true,
+              name: true,
+              batchNumber: true,
+              pickupInstructions: true,
+            },
+          },
+          payment: {
+            select: {
+              status: true,
+              providerPayloadJson: true,
+              providerReference: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+
+      return { updatedOrder, noticeReset };
+    });
+
+    if (outcome.status) {
+      return res.status(outcome.status).json({ message: outcome.message });
+    }
+
+    return res.json({
+      message: `Order changed to ${payload.fulfillmentMethod === 'DELIVERY' ? 'delivery' : 'pickup'} successfully.${outcome.noticeReset ? ' Send a new fulfillment notice to the customer.' : ''}`,
+      noticeReset: outcome.noticeReset,
+      order: {
+        ...outcome.updatedOrder,
+        displayOrderReference: getDisplayOrderReference(outcome.updatedOrder),
+        fulfillmentItems: normalizeFulfillmentItems(outcome.updatedOrder),
       },
     });
   } catch (error) {
