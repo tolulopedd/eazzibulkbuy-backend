@@ -1245,6 +1245,11 @@ const listOrdersQuerySchema = z.object({
     .optional(),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
+  likelyDuplicates: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => value === 'true'),
+  duplicateWindowMinutes: z.coerce.number().int().min(360).max(10080).default(1440),
   sortBy: z.enum(['createdAt', 'paidAt', 'totalAmount', 'status', 'paymentStatus', 'fulfillmentStatus']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).default(1),
@@ -4224,9 +4229,50 @@ export async function listCustomerMessagesHandler(req, res, next) {
     ]);
 
     const total = Number(countRows?.[0]?.count || 0);
+    const customerIds = [...new Set(rows.map((row) => row.user_id).filter(Boolean))];
+    const trailRows = customerIds.length
+      ? await prisma.$queryRaw`
+          SELECT
+            cn.id,
+            cn.user_id,
+            cn.order_id,
+            cn.order_references,
+            COALESCE(o.display_order_reference, o.order_reference) AS order_reference,
+            cn.source,
+            cn.note,
+            cn.message_type,
+            cn.read_at,
+            cn.created_by_user_id,
+            actor.name AS created_by_name,
+            actor.email AS created_by_email,
+            cn.created_at,
+            cn.updated_at,
+            customer.id AS customer_id,
+            customer.name AS customer_name,
+            customer.email AS customer_email,
+            customer.phone AS customer_phone,
+            customer.is_active AS customer_is_active
+          FROM customer_notes cn
+          JOIN users customer ON customer.id = cn.user_id
+          LEFT JOIN orders o ON o.id = cn.order_id
+          LEFT JOIN users actor ON actor.id = cn.created_by_user_id
+          WHERE cn.user_id IN (${Prisma.join(customerIds)})
+            AND (cn.source = 'CUSTOMER' OR cn.message_type = 'MESSAGE_REPLY')
+          ORDER BY cn.created_at ASC
+        `
+      : [];
+    const trailByCustomerId = new Map();
+    trailRows.forEach((row) => {
+      const customerTrail = trailByCustomerId.get(row.user_id) || [];
+      customerTrail.push(formatCustomerMessage(row));
+      trailByCustomerId.set(row.user_id, customerTrail);
+    });
 
     return res.json({
-      items: rows.map((row) => formatCustomerMessage(row)),
+      items: rows.map((row) => ({
+        ...formatCustomerMessage(row),
+        trail: trailByCustomerId.get(row.user_id) || [],
+      })),
       page,
       limit,
       total,
@@ -5306,10 +5352,111 @@ function serializeFulfillmentOrderForPartner(order) {
   };
 }
 
+function getLikelyDuplicateOrderKey(order) {
+  const snapshotItems = getOrderSnapshotItems(order);
+  const items = snapshotItems.length ? snapshotItems : [buildFallbackSnapshotItem(order)];
+  const itemSignature = items
+    .map((item) => ({
+      item: String(item.salesItemId || item.name || '').trim().toLowerCase(),
+      quantity: Number(item.quantity) || 0,
+      lineTotal: Number(item.lineTotal) || 0,
+    }))
+    .sort((left, right) => (
+      left.item.localeCompare(right.item)
+      || left.quantity - right.quantity
+      || left.lineTotal - right.lineTotal
+    ));
+  const originalItemsTotal = items.reduce((sum, item) => sum + (Number(item.lineTotal) || 0), 0);
+
+  return JSON.stringify({
+    userId: order.userId,
+    currency: order.currency,
+    originalItemsTotal,
+    items: itemSignature,
+  });
+}
+
+function buildLikelyDuplicateOrderGroups(orders, windowMinutes) {
+  const windowMs = windowMinutes * 60 * 1000;
+  const matchingBuckets = new Map();
+
+  orders
+    .filter((order) => !['CANCELLED', 'PENDING_PAYMENT'].includes(getDisplayPaymentStatus(order)))
+    .forEach((order) => {
+      const key = getLikelyDuplicateOrderKey(order);
+      const bucket = matchingBuckets.get(key) || [];
+      bucket.push(order);
+      matchingBuckets.set(key, bucket);
+    });
+
+  const groups = [];
+  matchingBuckets.forEach((bucket) => {
+    const sortedOrders = [...bucket].sort((left, right) => (
+      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
+    ));
+    let cluster = [];
+
+    const completeCluster = () => {
+      if (cluster.length < 2) {
+        cluster = [];
+        return;
+      }
+
+      const firstOrder = cluster[0];
+      const lastOrder = cluster[cluster.length - 1];
+      const paidOrderCount = cluster.filter(isOrderPaidLike).length;
+      groups.push({
+        id: `duplicate-${firstOrder.orderReference}`,
+        customer: firstOrder.user,
+        firstOrderAt: firstOrder.createdAt,
+        lastOrderAt: lastOrder.createdAt,
+        timeSpanMinutes: Math.max(
+          0,
+          Math.round((new Date(lastOrder.createdAt).getTime() - new Date(firstOrder.createdAt).getTime()) / 60000),
+        ),
+        paidOrderCount,
+        unpaidOrderCount: cluster.length - paidOrderCount,
+        hasSinglePaidOrder: paidOrderCount === 1,
+        orders: [...cluster].sort((left, right) => (
+          new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+        )),
+      });
+      cluster = [];
+    };
+
+    sortedOrders.forEach((order) => {
+      if (!cluster.length) {
+        cluster = [order];
+        return;
+      }
+
+      const clusterStartedAt = new Date(cluster[0].createdAt).getTime();
+      const orderCreatedAt = new Date(order.createdAt).getTime();
+      if (orderCreatedAt - clusterStartedAt <= windowMs) {
+        cluster.push(order);
+        return;
+      }
+
+      completeCluster();
+      cluster = [order];
+    });
+
+    completeCluster();
+  });
+
+  return groups.sort((left, right) => (
+    new Date(right.lastOrderAt).getTime() - new Date(left.lastOrderAt).getTime()
+  ));
+}
+
 export async function listOrdersHandler(req, res, next) {
   try {
     const query = listOrdersQuerySchema.parse(req.query);
     const isFulfillmentStaff = req.admin?.role === 'PARTNER' && !req.admin?.isSuperAdmin;
+
+    if (isFulfillmentStaff && query.likelyDuplicates) {
+      return res.status(403).json({ message: 'Only administrators can review likely duplicate orders.' });
+    }
 
     const where = {
       ...(query.status ? { status: query.status } : {}),
@@ -5427,6 +5574,21 @@ export async function listOrdersHandler(req, res, next) {
         pickupLocation: query.pickupLocation,
       }),
     );
+
+    if (query.likelyDuplicates) {
+      const duplicateGroups = buildLikelyDuplicateOrderGroups(normalizedOrders, query.duplicateWindowMinutes);
+      const total = duplicateGroups.length;
+      const skip = (query.page - 1) * query.limit;
+      return res.json({
+        items: duplicateGroups.slice(skip, skip + query.limit),
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalOrders: duplicateGroups.reduce((sum, group) => sum + group.orders.length, 0),
+        totalPages: Math.max(1, Math.ceil(total / query.limit)),
+        duplicateWindowMinutes: query.duplicateWindowMinutes,
+      });
+    }
 
     const total = normalizedOrders.length;
     const skip = (query.page - 1) * query.limit;
