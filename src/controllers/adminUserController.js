@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '../config/prisma.js';
 import { env } from '../config/env.js';
-import { sanitizeEmail, sanitizeText } from '../utils/sanitize.js';
+import { sanitizeEmail, sanitizeText, standardizeAddress, standardizeName } from '../utils/sanitize.js';
 import { buildInviteExpiry, createInviteToken, hashInviteToken } from '../utils/inviteToken.js';
 import { hashPassword } from '../utils/password.js';
 import { sendUserInviteEmail } from '../services/emailService.js';
@@ -23,21 +23,21 @@ const listUsersQuerySchema = z.object({
 });
 
 const createUserSchema = z.object({
-  name: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(120)),
+  name: z.preprocess((value) => standardizeName(value), z.string().min(2).max(120)),
   email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
   role: adminManagedRoleSchema,
   password: z.string().min(8).max(128).optional(),
   phone: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(7).max(30).optional()),
-  address: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(5).max(250).optional()),
+  address: z.preprocess((value) => (value === undefined ? undefined : standardizeAddress(value)), z.string().min(5).max(250).optional()),
   isActive: z.boolean().default(true),
 });
 
 const inviteUserSchema = z.object({
-  name: z.preprocess((value) => sanitizeText(value), z.string().min(2).max(120)),
+  name: z.preprocess((value) => standardizeName(value), z.string().min(2).max(120)),
   email: z.preprocess((value) => sanitizeEmail(value), z.string().email()),
   role: userRoleSchema,
   phone: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(7).max(30).optional()),
-  address: z.preprocess((value) => (value === undefined ? undefined : sanitizeText(value)), z.string().min(5).max(250).optional()),
+  address: z.preprocess((value) => (value === undefined ? undefined : standardizeAddress(value)), z.string().min(5).max(250).optional()),
   sendEmail: z.boolean().default(true),
 });
 

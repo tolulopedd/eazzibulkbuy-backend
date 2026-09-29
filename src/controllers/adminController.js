@@ -29,6 +29,7 @@ import { getActivePickupLocationNames, getAllPickupLocationNames, hasActivePicku
 import { getCentralDateParts, startOfCentralMonth, startOfCentralYear } from '../utils/centralTime.js';
 import { findActivePickupNoticeTemplateById } from './pickupNoticeTemplateController.js';
 import { issueStoreCredit } from '../services/storeCreditService.js';
+import { standardizeAddress, standardizeName } from '../utils/sanitize.js';
 
 function getAdminResolutionAction(order) {
   return order?.payment?.providerPayloadJson?.adminResolution?.action || '';
@@ -156,6 +157,56 @@ function getDisplayPaymentStatus(order) {
   }
 
   return order?.paymentStatus || 'UNKNOWN';
+}
+
+function getDisplayPaymentMethod(order) {
+  if (Number(order?.storeCreditApplied) > 0) {
+    if (Number(order?.amountDue) > 0 && order?.paymentMethod) {
+      return `STORE_CREDIT_AND_${order.paymentMethod}`;
+    }
+
+    return 'STORE_CREDIT';
+  }
+
+  if (getAdminResolutionAction(order) === 'STORE_CREDIT') {
+    return 'STORE_CREDIT';
+  }
+
+  if (getResolvedOrderSnapshotItems(order, 'STORE_CREDIT').length > 0) {
+    return 'STORE_CREDIT';
+  }
+
+  return order?.paymentMethod || 'UNKNOWN';
+}
+
+function orderMatchesPaymentMethod(order, paymentMethod) {
+  if (!paymentMethod) {
+    return true;
+  }
+
+  if (paymentMethod === 'STORE_CREDIT') {
+    return getDisplayPaymentMethod(order).startsWith('STORE_CREDIT');
+  }
+
+  if (
+    getAdminResolutionAction(order) === 'STORE_CREDIT' ||
+    (Number(order?.storeCreditApplied) > 0 && Number(order?.amountDue) === 0)
+  ) {
+    return false;
+  }
+
+  return order?.paymentMethod === paymentMethod;
+}
+
+function formatPaymentMethodForExport(order) {
+  const paymentMethod = getDisplayPaymentMethod(order);
+  const labels = {
+    STORE_CREDIT: 'Store Credit',
+    STORE_CREDIT_AND_INTERAC_E_TRANSFER: 'Store Credit + Interac e-Transfer',
+    STORE_CREDIT_AND_STRIPE_CARD: 'Store Credit + Stripe Card',
+  };
+
+  return labels[paymentMethod] || paymentMethod;
 }
 
 function isResolvedSnapshotItem(item) {
@@ -357,8 +408,15 @@ function getOrderBatchNumbers(order) {
   return [...new Set(batchNumbers)];
 }
 
+function normalizeSearchText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('en-CA')
+    .trim();
+}
+
 function includesInsensitive(value, query) {
-  return String(value || '').toLowerCase().includes(String(query || '').toLowerCase());
+  return normalizeSearchText(value).includes(normalizeSearchText(query));
 }
 
 function normalizePickupLocationText(value) {
@@ -1056,20 +1114,20 @@ const listCustomersQuerySchema = z.object({
 });
 
 const updateCustomerSchema = z.object({
-  name: z.string().trim().min(2).max(160),
+  name: z.string().trim().min(2).max(160).transform(standardizeName),
   email: z.string().trim().email(),
   phone: z.string().trim().max(40).nullable().optional(),
-  address: z.string().trim().max(255).nullable().optional(),
+  address: z.string().trim().max(255).nullable().optional().transform((value) => (value ? standardizeAddress(value) : value)),
   isActive: z.boolean(),
 });
 
 const createAdminCustomerSchema = z.object({
   title: z.enum(['Mr', 'Mrs', 'Miss']).optional(),
-  firstName: z.string().trim().min(2).max(80),
-  lastName: z.string().trim().min(2).max(80),
+  firstName: z.string().trim().min(2).max(80).transform(standardizeName),
+  lastName: z.string().trim().min(2).max(80).transform(standardizeName),
   email: z.string().trim().email(),
   phone: z.string().trim().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits.'),
-  address: z.string().trim().min(5).max(255),
+  address: z.string().trim().min(5).max(255).transform(standardizeAddress),
   city: z.string().trim().min(2).max(120),
   province: z.string().trim().min(2).max(120),
   postalCode: z.string().trim().min(3).max(20),
@@ -1241,7 +1299,7 @@ const listOrdersQuerySchema = z.object({
     .enum(['PENDING_PAYMENT', 'REQUIRES_ACTION', 'PENDING_REVIEW', 'SUCCEEDED', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'])
     .optional(),
   paymentMethod: z
-    .enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY'])
+    .enum(['STRIPE_CARD', 'INTERAC_E_TRANSFER', 'MANUAL_BANK_TRANSFER', 'OTHER_CA_GATEWAY', 'STORE_CREDIT'])
     .optional(),
   fulfillmentMethod: z.enum(['PICKUP', 'DELIVERY']).optional(),
   fulfillmentStatus: z.enum(['PENDING_PICKUP', 'PICKED_UP', 'PENDING_DELIVERY', 'DELIVERED']).optional(),
@@ -4674,7 +4732,7 @@ export async function approveCustomerUpdateRequestHandler(req, res, next) {
         where: { id: existingRequest.userId },
         data: {
           phone: existingRequest.phone,
-          address: existingRequest.address,
+          address: standardizeAddress(existingRequest.address),
           city: existingRequest.city,
           province: existingRequest.province,
           postalCode: existingRequest.postalCode,
@@ -5460,7 +5518,7 @@ export async function listOrdersHandler(req, res, next) {
 
     const where = {
       ...(query.status ? { status: query.status } : {}),
-      ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
+      ...(query.paymentMethod && query.paymentMethod !== 'STORE_CREDIT' ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
@@ -5566,6 +5624,7 @@ export async function listOrdersHandler(req, res, next) {
       }) &&
       (isFulfillmentStaff || query.paidOnly === true ? isOrderPaidLike(order) : true) &&
       (!isFulfillmentStaff && query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
+      orderMatchesPaymentMethod(order, query.paymentMethod) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -5614,7 +5673,7 @@ export async function exportOrdersHandler(req, res, next) {
 
     const where = {
       ...(query.status ? { status: query.status } : {}),
-      ...(query.paymentMethod ? { paymentMethod: query.paymentMethod } : {}),
+      ...(query.paymentMethod && query.paymentMethod !== 'STORE_CREDIT' ? { paymentMethod: query.paymentMethod } : {}),
       ...(query.paymentStatus && !['CANCELLED', 'REFUNDED', 'STORE_CREDIT', 'PARTIALLY_CANCELLED', 'PARTIALLY_REFUNDED', 'PARTIALLY_STORE_CREDIT', 'PARTIALLY_RESOLVED'].includes(query.paymentStatus) ? { paymentStatus: query.paymentStatus } : {}),
     };
 
@@ -5640,6 +5699,11 @@ export async function exportOrdersHandler(req, res, next) {
             pickupInstructions: true,
           },
         },
+        payment: {
+          select: {
+            providerPayloadJson: true,
+          },
+        },
       },
     });
 
@@ -5660,6 +5724,7 @@ export async function exportOrdersHandler(req, res, next) {
       }) &&
       (query.paidOnly === true ? isOrderPaidLike(order) : true) &&
       (query.paymentStatus ? getDisplayPaymentStatus(order) === query.paymentStatus : true) &&
+      orderMatchesPaymentMethod(order, query.paymentMethod) &&
       orderMatchesBatchNumber(order, query.batchNumber) &&
       orderMatchesTextQuery(order, query.q) &&
       orderMatchesFulfillmentFilters(order, {
@@ -5705,7 +5770,7 @@ export async function exportOrdersHandler(req, res, next) {
         order.user?.province || '',
         order.user?.postalCode || '',
         order.quantity,
-        order.paymentMethod,
+        formatPaymentMethodForExport(order),
         getDisplayPaymentStatus(order),
         order.status,
         order.fulfillmentMethod,
