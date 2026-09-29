@@ -161,7 +161,12 @@ function getDisplayPaymentStatus(order) {
 
 function getDisplayPaymentMethod(order) {
   if (Number(order?.storeCreditApplied) > 0) {
-    if (Number(order?.amountDue) > 0 && order?.paymentMethod) {
+    const externalPaymentAmount = Math.max(
+      0,
+      Number(order?.totalAmount || 0) - Number(order?.storeCreditApplied || 0),
+    );
+
+    if (externalPaymentAmount > 0 && order?.paymentMethod) {
       return `STORE_CREDIT_AND_${order.paymentMethod}`;
     }
 
@@ -190,7 +195,10 @@ function orderMatchesPaymentMethod(order, paymentMethod) {
 
   if (
     getAdminResolutionAction(order) === 'STORE_CREDIT' ||
-    (Number(order?.storeCreditApplied) > 0 && Number(order?.amountDue) === 0)
+    (
+      Number(order?.storeCreditApplied) > 0 &&
+      Number(order?.totalAmount || 0) - Number(order?.storeCreditApplied || 0) <= 0
+    )
   ) {
     return false;
   }
