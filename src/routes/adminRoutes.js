@@ -41,6 +41,7 @@ import {
   listPickupNoticesHandler,
   pickupAllocationPendingSummaryHandler,
   previewPickupAllocationHandler,
+  previewDistributionHandler,
   sendPickupNoticesHandler,
   sendGeneralNoticesHandler,
 } from '../controllers/adminController.js';
@@ -104,6 +105,7 @@ router.post('/discount-orders', requireAdminRoles('ADMIN', 'SUPERADMIN'), create
 router.get('/pickup-notices', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticesHandler);
 router.get('/pickup-notices/allocation-pending-summary', requireAdminRoles('ADMIN', 'SUPERADMIN'), pickupAllocationPendingSummaryHandler);
 router.post('/pickup-notices/allocation-preview', requireAdminRoles('ADMIN', 'SUPERADMIN'), previewPickupAllocationHandler);
+router.post('/pickup-notices/distribution-preview', requireAdminRoles('ADMIN', 'SUPERADMIN'), previewDistributionHandler);
 router.post('/pickup-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendPickupNoticesHandler);
 router.post('/general-notices/send', requireAdminRoles('ADMIN', 'SUPERADMIN'), sendGeneralNoticesHandler);
 router.get('/pickup-notice-templates', requireAdminRoles('ADMIN', 'SUPERADMIN'), listPickupNoticeTemplatesHandler);

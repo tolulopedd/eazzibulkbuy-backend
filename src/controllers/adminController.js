@@ -2415,6 +2415,178 @@ function sortPickupAllocationCandidates(left, right) {
   return getPickupAllocationCandidateSortTime(left) - getPickupAllocationCandidateSortTime(right);
 }
 
+function getDistributionDestination(row) {
+  if (row.fulfillmentMethod === 'DELIVERY') {
+    return [row.user?.address, row.user?.city, row.user?.province, row.user?.postalCode]
+      .filter(Boolean)
+      .join(', ') || 'Delivery address not set';
+  }
+
+  return row.preferredPickupLocation || row.pickupLocationFilterValue || row.location || 'Pickup location not set';
+}
+
+function getDistributionColumnKey(fulfillmentMethod, location) {
+  if (fulfillmentMethod === 'DELIVERY') {
+    return 'delivery';
+  }
+
+  const normalizedLocation = normalizeAllocationText(location);
+  if (normalizedLocation.includes('sage creek')) return 'sageCreek';
+  if (normalizedLocation.includes('kildonan')) return 'kildonan';
+  if (normalizedLocation.includes('dakota')) return 'dakota';
+  return null;
+}
+
+function buildAllocationPreview({ availableItems, rows, filterOptions = {} }) {
+  const initialStock = buildAllocationStock(availableItems);
+  const stock = new Map(initialStock);
+  const orderGroups = new Map();
+
+  for (const row of rows) {
+    const key = `${row.orderReference}:${row.fulfillmentMethod || 'PICKUP'}`;
+    const existing = orderGroups.get(key) || {
+      allocationKey: key,
+      orderReference: row.orderReference,
+      displayOrderReference: row.displayOrderReference,
+      paidAt: row.paidAt,
+      createdAt: row.createdAt,
+      user: row.user,
+      fulfillmentMethod: row.fulfillmentMethod || 'PICKUP',
+      preferredPickupLocation: row.preferredPickupLocation || '',
+      pickupLocation: getDistributionDestination(row),
+      items: [],
+    };
+    existing.items.push({
+      orderReference: row.orderReference,
+      displayOrderReference: row.displayOrderReference,
+      itemIndex: row.itemIndex,
+      name: row.name,
+      batchNumber: row.batchNumber || '',
+      quantity: Number(row.quantity) || 0,
+      paidAt: row.paidAt,
+      createdAt: row.createdAt,
+      fulfillmentMethod: row.fulfillmentMethod || 'PICKUP',
+      preferredPickupLocation: row.preferredPickupLocation || '',
+    });
+    orderGroups.set(key, existing);
+  }
+
+  const suggestions = [];
+  const skipped = [];
+  const candidates = Array.from(orderGroups.values()).sort(sortPickupAllocationCandidates);
+
+  for (const candidate of candidates) {
+    const allocatableItems = [];
+    const shortItems = [];
+    const matchingItems = candidate.items.filter((item) => hasAllocationStockForRow(initialStock, item));
+
+    for (const item of matchingItems) {
+      const availableQuantity = getAvailableQuantityForRow(stock, item);
+      if (availableQuantity >= item.quantity) {
+        allocatableItems.push(item);
+      } else {
+        shortItems.push({
+          name: item.name,
+          batchNumber: item.batchNumber,
+          requested: item.quantity,
+          available: availableQuantity,
+        });
+      }
+    }
+
+    if (!allocatableItems.length) {
+      skipped.push({
+        allocationKey: candidate.allocationKey,
+        orderReference: candidate.orderReference,
+        displayOrderReference: candidate.displayOrderReference,
+        buyerName: candidate.user?.name || 'Unknown buyer',
+        buyerEmail: candidate.user?.email || '',
+        paidAt: candidate.paidAt || candidate.createdAt,
+        fulfillmentMethod: candidate.fulfillmentMethod,
+        pickupLocation: candidate.pickupLocation,
+        items: candidate.items,
+        reason: 'Insufficient stock',
+        shortItems,
+      });
+      continue;
+    }
+
+    for (const item of allocatableItems) {
+      consumeAllocationStock(stock, item, item.quantity);
+    }
+
+    suggestions.push({
+      allocationKey: candidate.allocationKey,
+      orderReference: candidate.orderReference,
+      displayOrderReference: candidate.displayOrderReference,
+      buyerName: candidate.user?.name || 'Unknown buyer',
+      buyerEmail: candidate.user?.email || '',
+      buyerPhone: candidate.user?.phone || '',
+      paidAt: candidate.paidAt || candidate.createdAt,
+      fulfillmentMethod: candidate.fulfillmentMethod,
+      pickupLocation: candidate.pickupLocation,
+      preferredPickupLocation: candidate.preferredPickupLocation,
+      items: allocatableItems,
+      skippedItems: shortItems,
+      itemCount: allocatableItems.length,
+      totalPendingItems: candidate.items.length,
+      totalQuantity: allocatableItems.reduce((sum, item) => sum + item.quantity, 0),
+      totalPendingQuantity: candidate.items.reduce((sum, item) => sum + item.quantity, 0),
+    });
+  }
+
+  const remainingItems = availableItems.map((item) => {
+    const name = normalizeAllocationText(item.name);
+    const batchNumber = normalizeAllocationText(item.batchNumber);
+    const key = `${name}::${batchNumber}`;
+    return {
+      name: item.name,
+      batchNumber: item.batchNumber || '',
+      inputQuantity: item.quantity,
+      remainingQuantity: stock.get(key) || 0,
+    };
+  });
+
+  return {
+    suggestions,
+    skipped,
+    remainingItems,
+    filterOptions,
+    totalCandidates: candidates.length,
+    suggestedOrders: suggestions.length,
+  };
+}
+
+function buildDistributionRows(suggestions) {
+  const products = new Map();
+
+  suggestions.forEach((suggestion) => {
+    const destinationKey = getDistributionColumnKey(
+      suggestion.fulfillmentMethod,
+      suggestion.pickupLocation,
+    );
+
+    if (!destinationKey) {
+      return;
+    }
+
+    suggestion.items.forEach((item) => {
+      const key = normalizeAllocationText(item.name);
+      const current = products.get(key) || {
+        name: item.name,
+        sageCreek: 0,
+        kildonan: 0,
+        delivery: 0,
+        dakota: 0,
+      };
+      current[destinationKey] += Number(item.quantity) || 0;
+      products.set(key, current);
+    });
+  });
+
+  return Array.from(products.values()).sort((left, right) => left.name.localeCompare(right.name));
+}
+
 export async function previewPickupAllocationHandler(req, res, next) {
   try {
     const payload = previewPickupAllocationSchema.parse(req.body);
@@ -2429,115 +2601,50 @@ export async function previewPickupAllocationHandler(req, res, next) {
       page: 1,
       limit: 200,
     });
-    const initialStock = buildAllocationStock(payload.availableItems);
-    const stock = new Map(initialStock);
-    const orderGroups = new Map();
+    return res.json(buildAllocationPreview({
+      availableItems: payload.availableItems,
+      rows,
+      filterOptions,
+    }));
+  } catch (error) {
+    next(error);
+  }
+}
 
-    for (const row of rows) {
-      const key = row.orderReference;
-      const existing = orderGroups.get(key) || {
-        orderReference: row.orderReference,
-        displayOrderReference: row.displayOrderReference,
-        paidAt: row.paidAt,
-        createdAt: row.createdAt,
-        user: row.user,
-        preferredPickupLocation: row.preferredPickupLocation || '',
-        pickupLocation: row.pickupLocationFilterValue || row.preferredPickupLocation || row.location || '',
-        items: [],
-      };
-      existing.items.push({
-        orderReference: row.orderReference,
-        displayOrderReference: row.displayOrderReference,
-        itemIndex: row.itemIndex,
-        name: row.name,
-        batchNumber: row.batchNumber || '',
-        quantity: Number(row.quantity) || 0,
-        paidAt: row.paidAt,
-        createdAt: row.createdAt,
-        preferredPickupLocation: row.preferredPickupLocation || '',
-      });
-      orderGroups.set(key, existing);
-    }
-
-    const suggestions = [];
-    const skipped = [];
-    const candidates = Array.from(orderGroups.values()).sort(sortPickupAllocationCandidates);
-
-    for (const candidate of candidates) {
-      const allocatableItems = [];
-      const shortItems = [];
-      const matchingItems = candidate.items.filter((item) => hasAllocationStockForRow(initialStock, item));
-
-      for (const item of matchingItems) {
-        const availableQuantity = getAvailableQuantityForRow(stock, item);
-        if (availableQuantity >= item.quantity) {
-          allocatableItems.push(item);
-        } else {
-          shortItems.push({
-            name: item.name,
-            batchNumber: item.batchNumber,
-            requested: item.quantity,
-            available: availableQuantity,
-          });
-        }
-      }
-
-      if (!allocatableItems.length) {
-        skipped.push({
-          orderReference: candidate.orderReference,
-          displayOrderReference: candidate.displayOrderReference,
-          buyerName: candidate.user?.name || 'Unknown buyer',
-          buyerEmail: candidate.user?.email || '',
-          paidAt: candidate.paidAt || candidate.createdAt,
-          pickupLocation: candidate.pickupLocation,
-          items: candidate.items,
-          reason: 'Insufficient stock',
-          shortItems,
-        });
-        continue;
-      }
-
-      for (const item of allocatableItems) {
-        consumeAllocationStock(stock, item, item.quantity);
-      }
-
-      suggestions.push({
-        orderReference: candidate.orderReference,
-        displayOrderReference: candidate.displayOrderReference,
-        buyerName: candidate.user?.name || 'Unknown buyer',
-        buyerEmail: candidate.user?.email || '',
-        buyerPhone: candidate.user?.phone || '',
-        paidAt: candidate.paidAt || candidate.createdAt,
-        pickupLocation: candidate.pickupLocation,
-        preferredPickupLocation: candidate.preferredPickupLocation,
-        items: allocatableItems,
-        skippedItems: shortItems,
-        itemCount: allocatableItems.length,
-        totalPendingItems: candidate.items.length,
-        totalQuantity: allocatableItems.reduce((sum, item) => sum + item.quantity, 0),
-        totalPendingQuantity: candidate.items.reduce((sum, item) => sum + item.quantity, 0),
-      });
-    }
-
-    const remainingItems = payload.availableItems.map((item) => {
-      const name = normalizeAllocationText(item.name);
-      const batchNumber = normalizeAllocationText(item.batchNumber);
-      const key = `${name}::${batchNumber}`;
-      return {
-        name: item.name,
-        batchNumber: item.batchNumber || '',
-        inputQuantity: item.quantity,
-        remainingQuantity: stock.get(key) || 0,
-      };
+export async function previewDistributionHandler(req, res, next) {
+  try {
+    const payload = previewPickupAllocationSchema.parse(req.body);
+    const baseFilters = {
+      ...(payload.filters || {}),
+      fulfillmentMethod: undefined,
+      location: undefined,
+      sortBy: 'paidAt',
+      sortOrder: 'asc',
+      page: 1,
+      limit: 200,
+    };
+    const { rows, filterOptions } = await buildPickupNoticeRows(baseFilters);
+    const pendingRows = rows.filter((row) => {
+      const isPending =
+        (row.fulfillmentMethod === 'PICKUP' && row.fulfillmentStatus === 'PENDING_PICKUP') ||
+        (row.fulfillmentMethod === 'DELIVERY' && row.fulfillmentStatus === 'PENDING_DELIVERY');
+      return isPending && Boolean(getDistributionColumnKey(row.fulfillmentMethod, getDistributionDestination(row)));
     });
+    const preview = buildAllocationPreview({
+      availableItems: payload.availableItems,
+      rows: pendingRows,
+      filterOptions,
+    });
+    const distributionRows = buildDistributionRows(preview.suggestions);
 
     return res.json({
-      suggestions,
-      skipped,
-      remainingItems,
-      filterOptions,
-      totalCandidates: candidates.length,
-      suggestedOrders: suggestions.length,
+      ...preview,
+      distributionRows,
+      totalLocations: new Set(
+        distributionRows.flatMap((row) => (
+          ['sageCreek', 'kildonan', 'delivery', 'dakota'].filter((key) => row[key] > 0)
+        )),
+      ).size,
     });
   } catch (error) {
     next(error);
